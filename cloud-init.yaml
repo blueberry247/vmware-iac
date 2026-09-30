@@ -1,0 +1,11 @@
+#cloud-config
+
+package_update: true
+
+packages:
+  - ansible
+
+runcmd:
+  - systemctl enable ssh
+  - systemctl start ssh
+  - ansible --version > /tmp/ansible-version.txt
