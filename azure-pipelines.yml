@@ -7,13 +7,15 @@ trigger:
 - main
 
 pool:
-  vmImage: ubuntu-latest
+  name: VMware-Lab
 
 steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
-
 - script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+    echo "Azure DevOps self-hosted agent test"
+    echo "Hostname:"
+    hostname
+    echo "User:"
+    whoami
+    echo "IP addresses:"
+    hostname -I
+  displayName: 'Test VMware self-hosted agent'
