@@ -1,26 +1,47 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
 - main
 
 pool:
   name: VMware-Lab
 
+variables:
+- group: VMware-Terraform-Secrets
+
 steps:
-- script: |
-    echo "=== Azure DevOps VMware Agent ==="
-    hostname
-    whoami
+- checkout: self
 
-    echo "=== Terraform ==="
-    terraform version
+- task: AzureCLI@2
+  displayName: 'Terraform Init, Validate and Plan'
+  inputs:
+    azureSubscription: 'Azure-Terraform-State'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    addSpnToEnvironment: true
+    inlineScript: |
+      set -e
 
-    echo "=== vCenter DNS ==="
-    getent hosts VCSA.blue.local
+      echo "=== Agent ==="
+      hostname
+      whoami
 
-    echo "=== vCenter HTTPS ==="
-    curl -kI https://VCSA.blue.local
-  displayName: 'Test Terraform and vCenter connectivity'
+      echo "=== Terraform ==="
+      terraform version
+
+      echo "=== Terraform Init ==="
+      terraform init
+
+      echo "=== Terraform Validate ==="
+      terraform validate
+
+      echo "=== Terraform Plan ==="
+      terraform plan -input=false
+  env:
+    TF_VAR_vsphere_user: $(VSPHERE_USER)
+    TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+    TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+    ARM_USE_AZUREAD: "true"
+    ARM_USE_OIDC: "true"
+    ARM_CLIENT_ID: $(servicePrincipalId)
+    ARM_TENANT_ID: $(tenantId)
+    ARM_OIDC_TOKEN: $(idToken)
