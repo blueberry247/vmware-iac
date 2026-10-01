@@ -34,5 +34,12 @@ variable "virtual_machines" {
       memory   = 2048
       hostname = "tf-vm-005"
     }
+
+    "TF-VM-006" = {
+      cpu      = 2
+      memory   = 4096
+      hostname = "tf-vm-006"
+    }
   }
 }
+
