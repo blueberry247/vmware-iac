@@ -1,0 +1,12 @@
+#cloud-config
+
+package_update: true
+
+packages:
+  - git
+  - curl
+  - unzip
+
+runcmd:
+  - systemctl enable ssh
+  - systemctl start ssh
