@@ -271,3 +271,48 @@ resource "vsphere_virtual_machine" "ansible01" {
   }
 
 }
+
+# ============================================================
+# VMware VM Factory
+# ============================================================
+
+resource "vsphere_virtual_machine" "vm_factory" {
+  for_each = var.virtual_machines
+
+  name             = each.key
+  resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
+  datastore_id     = data.vsphere_datastore.datastore.id
+
+  num_cpus = each.value.cpu
+  memory   = each.value.memory
+
+  guest_id  = data.vsphere_virtual_machine.template_v3.guest_id
+  firmware  = "efi"
+  scsi_type = data.vsphere_virtual_machine.template_v3.scsi_type
+
+  network_interface {
+    network_id   = data.vsphere_network.nested_mgmt.id
+    adapter_type = data.vsphere_virtual_machine.template_v3.network_interface_types[0]
+  }
+
+  disk {
+    label            = "disk0"
+    size             = data.vsphere_virtual_machine.template_v3.disks[0].size
+    thin_provisioned = data.vsphere_virtual_machine.template_v3.disks[0].thin_provisioned
+  }
+
+  clone {
+    template_uuid = data.vsphere_virtual_machine.template_v3.id
+  }
+
+  extra_config = {
+    "guestinfo.metadata" = base64encode(
+      yamlencode({
+        "instance-id"    = lower(each.key)
+        "local-hostname" = each.value.hostname
+      })
+    )
+
+    "guestinfo.metadata.encoding" = "base64"
+  }
+}
