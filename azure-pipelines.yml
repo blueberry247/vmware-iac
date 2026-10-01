@@ -155,7 +155,7 @@ stages:
     and(
       succeeded(),
       eq(
-        stageDependencies.Plan.TerraformPlan.outputs['terraformPlan.changesDetected'],
+        dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'],
         'true'
       )
     )
