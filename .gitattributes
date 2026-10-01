@@ -1,0 +1,4 @@
+# Keep Terraform and YAML files consistent between Windows and Linux
+*.tf text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
