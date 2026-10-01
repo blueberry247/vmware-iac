@@ -138,6 +138,51 @@ data "vsphere_virtual_machine" "template_v3" {
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
+# ============================================================
+# TF-VM-004 - Cloud-init enabled
+# ============================================================
+
+resource "vsphere_virtual_machine" "vm04" {
+  name             = "TF-VM-004"
+  resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
+  datastore_id     = data.vsphere_datastore.datastore.id
+
+  num_cpus = 2
+  memory   = 2048
+
+  guest_id  = data.vsphere_virtual_machine.template_v3.guest_id
+  firmware  = "efi"
+  scsi_type = data.vsphere_virtual_machine.template_v3.scsi_type
+
+  network_interface {
+    network_id   = data.vsphere_network.nested_mgmt.id
+    adapter_type = data.vsphere_virtual_machine.template_v3.network_interface_types[0]
+  }
+
+  disk {
+    label            = "disk0"
+    size             = data.vsphere_virtual_machine.template_v3.disks[0].size
+    thin_provisioned = data.vsphere_virtual_machine.template_v3.disks[0].thin_provisioned
+  }
+
+  clone {
+    template_uuid = data.vsphere_virtual_machine.template_v3.id
+  }
+
+  extra_config = {
+
+    # Cloud-init metadata
+    "guestinfo.metadata" = base64encode(
+      yamlencode({
+        "instance-id"    = "tf-vm-004"
+        "local-hostname" = "tf-vm-004"
+      })
+    )
+
+    "guestinfo.metadata.encoding" = "base64"
+  }
+}
+
 
 # ============================================================
 # Ansible Control Node
