@@ -20,6 +20,13 @@ steps:
     inlineScript: |
       set -e
 
+      # Pass Azure DevOps Workload Identity Federation credentials to Terraform
+      export ARM_USE_AZUREAD=true
+      export ARM_USE_OIDC=true
+      export ARM_CLIENT_ID="$servicePrincipalId"
+      export ARM_TENANT_ID="$tenantId"
+      export ARM_OIDC_TOKEN="$idToken"
+
       echo "=== Agent ==="
       hostname
       whoami
@@ -39,9 +46,3 @@ steps:
     TF_VAR_vsphere_user: $(VSPHERE_USER)
     TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
     TF_VAR_vsphere_server: $(VSPHERE_SERVER)
-
-    ARM_USE_AZUREAD: "true"
-    ARM_USE_OIDC: "true"
-    ARM_CLIENT_ID: $(servicePrincipalId)
-    ARM_TENANT_ID: $(tenantId)
-    ARM_OIDC_TOKEN: $(idToken)
