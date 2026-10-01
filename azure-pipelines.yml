@@ -7,42 +7,104 @@ pool:
 variables:
 - group: VMware-Terraform-Secrets
 
-steps:
-- checkout: self
+stages:
 
-- task: AzureCLI@2
-  displayName: 'Terraform Init, Validate and Plan'
-  inputs:
-    azureSubscription: 'Azure-Terraform-State'
-    scriptType: 'bash'
-    scriptLocation: 'inlineScript'
-    addSpnToEnvironment: true
-    inlineScript: |
-      set -e
+# ============================================================
+# STAGE 1 - TERRAFORM PLAN
+# ============================================================
+- stage: Plan
+  displayName: 'Terraform Plan'
 
-      # Pass Azure DevOps Workload Identity Federation credentials to Terraform
-      export ARM_USE_AZUREAD=true
-      export ARM_USE_OIDC=true
-      export ARM_CLIENT_ID="$servicePrincipalId"
-      export ARM_TENANT_ID="$tenantId"
-      export ARM_OIDC_TOKEN="$idToken"
+  jobs:
+  - job: TerraformPlan
+    displayName: 'Terraform Init, Validate and Plan'
 
-      echo "=== Agent ==="
-      hostname
-      whoami
+    steps:
+    - checkout: self
 
-      echo "=== Terraform ==="
-      terraform version
+    - task: AzureCLI@2
+      displayName: 'Terraform Init, Validate and Plan'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -e
 
-      echo "=== Terraform Init ==="
-      terraform init
+          export ARM_USE_AZUREAD=true
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
 
-      echo "=== Terraform Validate ==="
-      terraform validate
+          echo "=== Terraform Init ==="
+          terraform init
 
-      echo "=== Terraform Plan ==="
-      terraform plan -input=false
-  env:
-    TF_VAR_vsphere_user: $(VSPHERE_USER)
-    TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
-    TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+          echo "=== Terraform Validate ==="
+          terraform validate
+
+          echo "=== Terraform Plan ==="
+          terraform plan -input=false -out=tfplan
+
+      env:
+        TF_VAR_vsphere_user: $(VSPHERE_USER)
+        TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+        TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+    - publish: $(System.DefaultWorkingDirectory)/tfplan
+      artifact: terraform-plan
+      displayName: 'Publish Terraform Plan'
+
+
+# ============================================================
+# STAGE 2 - APPROVAL + TERRAFORM APPLY
+# ============================================================
+- stage: Apply
+  displayName: 'Terraform Apply'
+  dependsOn: Plan
+  condition: succeeded()
+
+  jobs:
+  - deployment: TerraformApply
+    displayName: 'Approved Terraform Apply'
+
+    environment: 'VMware-Production'
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - download: current
+            artifact: terraform-plan
+            displayName: 'Download Terraform Plan'
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Apply'
+            inputs:
+              azureSubscription: 'Azure-Terraform-State'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
+
+                echo "=== Terraform Init ==="
+                terraform init
+
+                echo "=== Applying Approved Plan ==="
+                terraform apply -input=false "$(Pipeline.Workspace)/terraform-plan/tfplan"
+
+            env:
+              TF_VAR_vsphere_user: $(VSPHERE_USER)
+              TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+              TF_VAR_vsphere_server: $(VSPHERE_SERVER)
