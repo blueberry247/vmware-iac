@@ -20,38 +20,120 @@ stages:
     displayName: 'Terraform Init, Validate and Plan'
 
     steps:
+
+    # --------------------------------------------------------
+    # Checkout GitHub repository
+    # --------------------------------------------------------
     - checkout: self
 
+    # --------------------------------------------------------
+    # Terraform Init / Validate / Plan
+    # --------------------------------------------------------
     - task: AzureCLI@2
+      name: terraformPlan
       displayName: 'Terraform Init, Validate and Plan'
+
       inputs:
         azureSubscription: 'Azure-Terraform-State'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         addSpnToEnvironment: true
+
         inlineScript: |
           set -e
 
+          echo "=========================================="
+          echo " Azure DevOps VMware Terraform Pipeline"
+          echo "=========================================="
+
+          # --------------------------------------------------
+          # Azure Workload Identity Federation
+          # --------------------------------------------------
           export ARM_USE_AZUREAD=true
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_OIDC_TOKEN="$idToken"
 
+          echo ""
+          echo "=== Agent Information ==="
+          hostname
+          whoami
+
+          echo ""
+          echo "=== Terraform Version ==="
+          terraform version
+
+          echo ""
           echo "=== Terraform Init ==="
           terraform init
 
+          echo ""
           echo "=== Terraform Validate ==="
           terraform validate
 
+          echo ""
           echo "=== Terraform Plan ==="
-          terraform plan -input=false -out=tfplan
+
+          # Terraform detailed exit codes:
+          #
+          # 0 = Successful plan with NO changes
+          # 1 = Terraform error
+          # 2 = Successful plan WITH changes
+
+          set +e
+
+          terraform plan \
+            -input=false \
+            -detailed-exitcode \
+            -out=tfplan
+
+          PLAN_EXIT_CODE=$?
+
+          set -e
+
+          echo ""
+          echo "Terraform plan exit code: $PLAN_EXIT_CODE"
+
+          if [ "$PLAN_EXIT_CODE" -eq 0 ]; then
+
+            echo ""
+            echo "=========================================="
+            echo " No Terraform changes detected"
+            echo " Apply stage will be skipped"
+            echo "=========================================="
+
+            echo "##vso[task.setvariable variable=changesDetected;isOutput=true]false"
+
+          elif [ "$PLAN_EXIT_CODE" -eq 2 ]; then
+
+            echo ""
+            echo "=========================================="
+            echo " Terraform changes detected"
+            echo " Approval will be required before Apply"
+            echo "=========================================="
+
+            echo "##vso[task.setvariable variable=changesDetected;isOutput=true]true"
+
+          else
+
+            echo ""
+            echo "=========================================="
+            echo " Terraform Plan FAILED"
+            echo "=========================================="
+
+            exit "$PLAN_EXIT_CODE"
+
+          fi
 
       env:
         TF_VAR_vsphere_user: $(VSPHERE_USER)
         TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
         TF_VAR_vsphere_server: $(VSPHERE_SERVER)
 
+    # --------------------------------------------------------
+    # Save the exact Terraform plan as pipeline artifact
+    # --------------------------------------------------------
     - publish: $(System.DefaultWorkingDirectory)/tfplan
       artifact: terraform-plan
       displayName: 'Publish Terraform Plan'
@@ -62,10 +144,30 @@ stages:
 # ============================================================
 - stage: Apply
   displayName: 'Terraform Apply'
-  dependsOn: Plan
-  condition: succeeded()
+
+  dependsOn:
+  - Plan
+
+  # Only run Apply when:
+  # 1. Plan stage succeeded
+  # 2. Terraform detected infrastructure changes
+  condition: |
+    and(
+      succeeded(),
+      eq(
+        stageDependencies.Plan.TerraformPlan.outputs['terraformPlan.changesDetected'],
+        'true'
+      )
+    )
 
   jobs:
+
+  # ----------------------------------------------------------
+  # Deployment job uses VMware-Production environment.
+  #
+  # The approval configured on VMware-Production will stop
+  # the deployment here until an authorised person approves it.
+  # ----------------------------------------------------------
   - deployment: TerraformApply
     displayName: 'Approved Terraform Apply'
 
@@ -74,35 +176,73 @@ stages:
     strategy:
       runOnce:
         deploy:
+
           steps:
 
+          # --------------------------------------------------
+          # Checkout same repository
+          # --------------------------------------------------
           - checkout: self
 
+          # --------------------------------------------------
+          # Download exact plan produced by Plan stage
+          # --------------------------------------------------
           - download: current
             artifact: terraform-plan
             displayName: 'Download Terraform Plan'
 
+          # --------------------------------------------------
+          # Apply approved Terraform plan
+          # --------------------------------------------------
           - task: AzureCLI@2
             displayName: 'Terraform Apply'
+
             inputs:
               azureSubscription: 'Azure-Terraform-State'
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               addSpnToEnvironment: true
+
               inlineScript: |
                 set -e
 
+                echo "=========================================="
+                echo " Approved VMware Terraform Deployment"
+                echo "=========================================="
+
+                # --------------------------------------------
+                # Azure Workload Identity Federation
+                # --------------------------------------------
                 export ARM_USE_AZUREAD=true
                 export ARM_USE_OIDC=true
                 export ARM_CLIENT_ID="$servicePrincipalId"
                 export ARM_TENANT_ID="$tenantId"
                 export ARM_OIDC_TOKEN="$idToken"
 
+                echo ""
+                echo "=== Agent Information ==="
+                hostname
+                whoami
+
+                echo ""
+                echo "=== Terraform Version ==="
+                terraform version
+
+                echo ""
                 echo "=== Terraform Init ==="
                 terraform init
 
-                echo "=== Applying Approved Plan ==="
-                terraform apply -input=false "$(Pipeline.Workspace)/terraform-plan/tfplan"
+                echo ""
+                echo "=== Applying Approved Terraform Plan ==="
+
+                terraform apply \
+                  -input=false \
+                  "$(Pipeline.Workspace)/terraform-plan/tfplan"
+
+                echo ""
+                echo "=========================================="
+                echo " Terraform Apply Completed"
+                echo "=========================================="
 
             env:
               TF_VAR_vsphere_user: $(VSPHERE_USER)
