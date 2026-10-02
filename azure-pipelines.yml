@@ -1,4 +1,3 @@
-trigger:
 parameters:
 - name: vm_name
   displayName: 'VM Name'
