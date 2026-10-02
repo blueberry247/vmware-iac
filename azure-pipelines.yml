@@ -1,4 +1,16 @@
+# ============================================================
+# VMware VM Provisioning Pipeline
+#
+# Jira -> Azure DevOps -> Terraform -> VMware
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Values supplied by Jira
+# ------------------------------------------------------------
+
 parameters:
+
 - name: vm_name
   displayName: 'VM Name'
   type: string
@@ -35,30 +47,20 @@ parameters:
   default: 'NESTED-MGMT'
 
 
-# ============================================================
-# PIPELINE TRIGGER
-# ============================================================
+# ------------------------------------------------------------
+# Pipeline settings
+# ------------------------------------------------------------
 
 trigger:
 - main
 
-
-# ============================================================
-# AGENT POOL
-# ============================================================
-
 pool:
   name: VMware-Lab
-
-
-# ============================================================
-# VARIABLES
-# ============================================================
 
 variables:
 - group: VMware-Terraform-Secrets
 
-- name: terraformWorkingDirectory
+- name: terraformDirectory
   value: '$(System.DefaultWorkingDirectory)/jira-vm'
 
 
@@ -71,8 +73,8 @@ stages:
 - stage: Plan
   displayName: 'Terraform Plan'
 
-  # Only run the Jira VM provisioning workflow when a VM name
-  # has been supplied to the pipeline.
+  # Do not provision anything when a normal Git commit
+  # triggers the pipeline without a VM request.
   condition: |
     and(
       succeeded(),
@@ -82,131 +84,56 @@ stages:
   jobs:
 
   - job: TerraformPlan
-    displayName: 'Terraform Init, Validate and Plan'
+    displayName: 'Plan VM'
 
     steps:
 
-    # --------------------------------------------------------
-    # Checkout GitHub repository
-    # --------------------------------------------------------
-
     - checkout: self
-
-
-    # --------------------------------------------------------
-    # Terraform Init / Validate / Plan
-    # --------------------------------------------------------
 
     - task: AzureCLI@2
       name: terraformPlan
       displayName: 'Terraform Init, Validate and Plan'
 
       inputs:
-
         azureSubscription: 'Azure-Terraform-State'
-
         scriptType: 'bash'
-
         scriptLocation: 'inlineScript'
-
         addSpnToEnvironment: true
 
         inlineScript: |
 
           set -e
 
-          echo "=========================================="
-          echo " Jira VMware Terraform Provisioning"
-          echo "=========================================="
-
-          # --------------------------------------------------
-          # Azure Workload Identity Federation
-          # --------------------------------------------------
-
+          # Azure authentication for Terraform state
           export ARM_USE_AZUREAD=true
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_OIDC_TOKEN="$idToken"
 
+          cd "$(terraformDirectory)"
 
-          echo ""
-          echo "=== Agent Information ==="
+          echo "===================================="
+          echo "VM Request"
+          echo "===================================="
+          echo "Name:     $TF_VAR_vm_name"
+          echo "Hostname: $TF_VAR_vm_hostname"
+          echo "CPU:      $TF_VAR_vm_cpu"
+          echo "Memory:   $TF_VAR_vm_memory"
+          echo "Network:  $TF_VAR_vm_network"
+          echo "===================================="
 
-          hostname
-          whoami
-
-
-          echo ""
-          echo "=== Terraform Version ==="
-
-          terraform version
-
-
-          echo ""
-          echo "=== Jira VM Request ==="
-
-          echo "VM Name:     $TF_VAR_vm_name"
-          echo "Hostname:    $TF_VAR_vm_hostname"
-          echo "CPU:         $TF_VAR_vm_cpu"
-          echo "Memory:      $TF_VAR_vm_memory"
-          echo "Network:     $TF_VAR_vm_network"
-          echo "Environment: $VM_ENVIRONMENT"
-          echo "OS:          $VM_OS"
-
-
-          # --------------------------------------------------
-          # Move into Jira VM Terraform configuration
-          # --------------------------------------------------
-
-          echo ""
-          echo "=== Terraform Working Directory ==="
-
-          cd "$(terraformWorkingDirectory)"
-
-          pwd
-
-
-          # --------------------------------------------------
-          # Terraform Init
-          #
-          # Every Jira VM gets an independent Terraform state:
-          #
-          # jira-vms/TF-VM-010.tfstate
-          # jira-vms/TF-VM-011.tfstate
-          # etc.
-          # --------------------------------------------------
-
-          echo ""
-          echo "=== Terraform Init ==="
-
+          # Each Jira VM gets its own Terraform state.
           terraform init \
             -reconfigure \
             -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
-
-          # --------------------------------------------------
-          # Terraform Validate
-          # --------------------------------------------------
-
-          echo ""
-          echo "=== Terraform Validate ==="
-
           terraform validate
 
-
-          # --------------------------------------------------
-          # Terraform Plan
-          # --------------------------------------------------
-
-          echo ""
-          echo "=== Terraform Plan ==="
-
-          # Terraform detailed exit codes:
-          #
-          # 0 = Successful plan with NO changes
-          # 1 = Terraform error
-          # 2 = Successful plan WITH changes
+          # Exit codes:
+          # 0 = no changes
+          # 1 = error
+          # 2 = changes found
 
           set +e
 
@@ -219,75 +146,42 @@ stages:
 
           set -e
 
-
-          echo ""
-          echo "Terraform plan exit code: $PLAN_EXIT_CODE"
-
-
           if [ "$PLAN_EXIT_CODE" -eq 0 ]; then
 
-            echo ""
-            echo "=========================================="
-            echo " No Terraform changes detected"
-            echo " Apply stage will be skipped"
-            echo "=========================================="
+            echo "No Terraform changes detected."
 
             echo "##vso[task.setvariable variable=changesDetected;isOutput=true]false"
 
-
           elif [ "$PLAN_EXIT_CODE" -eq 2 ]; then
 
-            echo ""
-            echo "=========================================="
-            echo " Terraform changes detected"
-            echo " Approval will be required before Apply"
-            echo "=========================================="
+            echo "Terraform changes detected."
 
             echo "##vso[task.setvariable variable=changesDetected;isOutput=true]true"
 
-
           else
 
-            echo ""
-            echo "=========================================="
-            echo " Terraform Plan FAILED"
-            echo "=========================================="
+            echo "Terraform plan failed."
 
             exit "$PLAN_EXIT_CODE"
 
           fi
 
-
       env:
-
-        # vSphere credentials
         TF_VAR_vsphere_user: $(VSPHERE_USER)
         TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
         TF_VAR_vsphere_server: $(VSPHERE_SERVER)
 
-        # Jira VM request
         TF_VAR_vm_name: ${{ parameters.vm_name }}
         TF_VAR_vm_hostname: ${{ parameters.vm_hostname }}
         TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
         TF_VAR_vm_memory: ${{ parameters.vm_memory }}
         TF_VAR_vm_network: ${{ parameters.vm_network }}
 
-        # Currently informational.
-        # Terraform does not use these two variables yet.
-        VM_ENVIRONMENT: ${{ parameters.vm_environment }}
-        VM_OS: ${{ parameters.vm_os }}
 
-
-    # --------------------------------------------------------
-    # Save exact Terraform plan as pipeline artifact
-    # --------------------------------------------------------
-
-    - publish: $(terraformWorkingDirectory)/tfplan
-
+    # Save the exact Terraform plan that was reviewed.
+    - publish: $(terraformDirectory)/tfplan
       artifact: terraform-plan
-
-      displayName: 'Publish Terraform Plan'
-
+      displayName: 'Save Terraform Plan'
 
 
 # ============================================================
@@ -295,20 +189,12 @@ stages:
 # ============================================================
 
 - stage: Apply
-
   displayName: 'Terraform Apply'
 
   dependsOn:
   - Plan
 
-
-  # Only run Apply when:
-  #
-  # 1. Plan succeeded
-  # 2. VM name was supplied
-  # 3. Terraform detected changes
-  # ----------------------------------------------------------
-
+  # Apply only when Terraform found changes.
   condition: |
     and(
       succeeded(),
@@ -319,20 +205,13 @@ stages:
       )
     )
 
-
   jobs:
 
-
-  # ----------------------------------------------------------
-  # VMware-Production contains the Azure DevOps approval check.
-  # ----------------------------------------------------------
-
   - deployment: TerraformApply
+    displayName: 'Create VMware VM'
 
-    displayName: 'Approved Terraform Apply'
-
+    # Approval is configured on this Azure DevOps environment.
     environment: 'VMware-Production'
-
 
     strategy:
 
@@ -342,137 +221,57 @@ stages:
 
           steps:
 
-
-          # --------------------------------------------------
-          # Checkout same GitHub repository
-          # --------------------------------------------------
-
           - checkout: self
 
-
-          # --------------------------------------------------
-          # Download exact plan created during Plan
-          # --------------------------------------------------
-
           - download: current
-
             artifact: terraform-plan
-
             displayName: 'Download Terraform Plan'
 
 
-          # --------------------------------------------------
-          # Terraform Apply
-          # --------------------------------------------------
-
           - task: AzureCLI@2
-
             displayName: 'Terraform Apply'
 
-
             inputs:
-
               azureSubscription: 'Azure-Terraform-State'
-
               scriptType: 'bash'
-
               scriptLocation: 'inlineScript'
-
               addSpnToEnvironment: true
-
 
               inlineScript: |
 
                 set -e
 
-
-                echo "=========================================="
-                echo " Approved Jira VMware Deployment"
-                echo "=========================================="
-
-
-                # --------------------------------------------
-                # Azure Workload Identity Federation
-                # --------------------------------------------
-
+                # Azure authentication for Terraform state
                 export ARM_USE_AZUREAD=true
                 export ARM_USE_OIDC=true
                 export ARM_CLIENT_ID="$servicePrincipalId"
                 export ARM_TENANT_ID="$tenantId"
                 export ARM_OIDC_TOKEN="$idToken"
 
+                cd "$(terraformDirectory)"
 
-                echo ""
-                echo "=== VM Being Provisioned ==="
-
-                echo "VM Name:  $TF_VAR_vm_name"
-                echo "Hostname: $TF_VAR_vm_hostname"
-                echo "CPU:      $TF_VAR_vm_cpu"
-                echo "Memory:   $TF_VAR_vm_memory"
-                echo "Network:  $TF_VAR_vm_network"
-
-
-                echo ""
-                echo "=== Terraform Version ==="
-
-                terraform version
-
-
-                # --------------------------------------------
-                # Jira Terraform directory
-                # --------------------------------------------
-
-                cd "$(terraformWorkingDirectory)"
-
-
-                # --------------------------------------------
-                # Initialise EXACT SAME state used during Plan
-                # --------------------------------------------
-
-                echo ""
-                echo "=== Terraform Init ==="
-
+                # Connect to the same state used during Plan.
                 terraform init \
                   -reconfigure \
                   -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
-
-                # --------------------------------------------
-                # Apply exact approved plan artifact
-                # --------------------------------------------
-
-                echo ""
-                echo "=== Applying Approved Terraform Plan ==="
-
+                # Apply the exact plan that was approved.
                 terraform apply \
                   -input=false \
                   "$(Pipeline.Workspace)/terraform-plan/tfplan"
 
-
-                # --------------------------------------------
-                # Display VM information
-                # --------------------------------------------
-
                 echo ""
-                echo "=== VM Provisioning Results ==="
+                echo "===================================="
+                echo "VM CREATED"
+                echo "===================================="
 
                 terraform output
 
-
-                echo ""
-                echo "=========================================="
-                echo " Terraform Apply Completed"
-                echo "=========================================="
-
-
             env:
-
-              # vSphere credentials
               TF_VAR_vsphere_user: $(VSPHERE_USER)
               TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
               TF_VAR_vsphere_server: $(VSPHERE_SERVER)
 
-              # Same VM values used during Plan
               TF_VAR_vm_name: ${{ parameters.vm_name }}
               TF_VAR_vm_hostname: ${{ parameters.vm_hostname }}
               TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
