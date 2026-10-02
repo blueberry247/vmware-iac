@@ -1,4 +1,41 @@
 trigger:
+parameters:
+- name: vm_name
+  displayName: 'VM Name'
+  type: string
+  default: ''
+
+- name: vm_hostname
+  displayName: 'VM Hostname'
+  type: string
+  default: ''
+
+- name: vm_cpu
+  displayName: 'CPU'
+  type: number
+  default: 2
+
+- name: vm_memory
+  displayName: 'Memory (MB)'
+  type: number
+  default: 2048
+
+- name: vm_environment
+  displayName: 'Environment'
+  type: string
+  default: 'Development'
+
+- name: vm_os
+  displayName: 'Operating System'
+  type: string
+  default: 'Debian 13'
+
+- name: vm_network
+  displayName: 'VM Network'
+  type: string
+  default: 'NESTED-MGMT'
+
+trigger:
 - main
 
 pool:
