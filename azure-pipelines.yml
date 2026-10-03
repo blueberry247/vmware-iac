@@ -4,7 +4,6 @@
 # Jira -> Azure DevOps -> Terraform -> VMware
 # ============================================================
 
-
 # ------------------------------------------------------------
 # Values supplied by Jira
 # ------------------------------------------------------------
@@ -121,6 +120,7 @@ stages:
           echo "===================================="
           echo "VM Request"
           echo "===================================="
+          echo "Jira:     $JIRA_ISSUE_KEY"
           echo "Name:     $TF_VAR_vm_name"
           echo "Hostname: $TF_VAR_vm_hostname"
           echo "CPU:      $TF_VAR_vm_cpu"
@@ -182,6 +182,7 @@ stages:
         TF_VAR_vm_memory: ${{ parameters.vm_memory }}
         TF_VAR_vm_network: ${{ parameters.vm_network }}
 
+        JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
 
     # Save the exact Terraform plan that was reviewed.
     - publish: $(terraformDirectory)/tfplan
@@ -231,7 +232,6 @@ stages:
           - download: current
             artifact: terraform-plan
             displayName: 'Download Terraform Plan'
-
 
           - task: AzureCLI@2
             displayName: 'Terraform Apply'
@@ -283,6 +283,10 @@ stages:
               TF_VAR_vm_memory: ${{ parameters.vm_memory }}
               TF_VAR_vm_network: ${{ parameters.vm_network }}
 
+          # ----------------------------------------------------
+          # Write successful provisioning details back to Jira
+          # ----------------------------------------------------
+
           - task: Bash@3
             displayName: 'Update Jira with VM details'
 
@@ -290,6 +294,7 @@ stages:
 
             inputs:
               targetType: 'inline'
+
               script: |
                 set -e
 
@@ -374,6 +379,75 @@ stages:
               JIRA_BASE_URL: $(JIRA_BASE_URL)
               JIRA_EMAIL: $(JIRA_EMAIL)
               JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+
               JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
               VM_HOSTNAME: ${{ parameters.vm_hostname }}
+
+
+# ============================================================
+# STAGE 3 - TEMPORARY JIRA CONNECTION TEST
+#
+# Remove this stage after the Jira API test succeeds.
+# It only runs when jira_issue_key = IT-6.
+# ============================================================
+
+- stage: TestJira
+  displayName: 'Test Jira Connection'
+
+  condition: eq('${{ parameters.jira_issue_key }}', 'IT-6')
+
+  jobs:
+
+  - job: TestJiraComment
+    displayName: 'Post Test Comment'
+
+    steps:
+
+    - task: Bash@3
+      displayName: 'Send test comment to Jira'
+
+      inputs:
+        targetType: 'inline'
+
+        script: |
+          set -e
+
+          echo "Testing Azure DevOps to Jira connection..."
+
+          curl --fail-with-body \
+            --request POST \
+            --url "$JIRA_BASE_URL/rest/api/3/issue/IT-6/comment" \
+            --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data '{
+              "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Azure DevOps to Jira connection test successful."
+                      }
+                    ]
+                  }
+                ]
+              }
+            }'
+
+          echo ""
+          echo "Jira connection test completed successfully."
+
+      env:
+        JIRA_BASE_URL: $(JIRA_BASE_URL)
+        JIRA_EMAIL: $(JIRA_EMAIL)
+        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+                
+
+
+
+              
               
