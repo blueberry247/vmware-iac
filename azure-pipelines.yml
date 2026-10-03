@@ -282,3 +282,98 @@ stages:
               TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
               TF_VAR_vm_memory: ${{ parameters.vm_memory }}
               TF_VAR_vm_network: ${{ parameters.vm_network }}
+
+          - task: Bash@3
+            displayName: 'Update Jira with VM details'
+
+            condition: succeeded()
+
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+
+                cd "$(terraformDirectory)"
+
+                VM_NAME=$(terraform output -raw vm_name)
+                VM_IP=$(terraform output -raw vm_ip_address)
+
+                echo "Updating Jira issue: $JIRA_ISSUE_KEY"
+                echo "VM Name: $VM_NAME"
+                echo "VM IP: $VM_IP"
+
+                JIRA_COMMENT=$(cat <<EOF
+                {
+                  "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "VM provisioning completed successfully."
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "VM Name: $VM_NAME"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Hostname: $VM_HOSTNAME"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "IP Address: $VM_IP"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Provisioned automatically by Azure DevOps / Terraform."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+                EOF
+                )
+
+                curl --fail-with-body \
+                  --request POST \
+                  --url "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY/comment" \
+                  --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+                  --header "Accept: application/json" \
+                  --header "Content-Type: application/json" \
+                  --data "$JIRA_COMMENT"
+
+                echo ""
+                echo "Jira issue $JIRA_ISSUE_KEY updated successfully."
+
+            env:
+              JIRA_BASE_URL: $(JIRA_BASE_URL)
+              JIRA_EMAIL: $(JIRA_EMAIL)
+              JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+              JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+              VM_HOSTNAME: ${{ parameters.vm_hostname }}
+              
