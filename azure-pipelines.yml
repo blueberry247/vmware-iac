@@ -394,7 +394,11 @@ stages:
 - stage: TestJira
   displayName: 'Test Jira Connection'
 
-  condition: eq('${{ parameters.jira_issue_key }}', 'IT-6')
+  condition: |
+  and(
+    always(),
+    eq('${{ parameters.jira_issue_key }}', 'IT-6')
+  )
 
   jobs:
 
