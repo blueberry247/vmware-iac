@@ -11,6 +11,11 @@
 
 parameters:
 
+- name: jira_issue_key
+  displayName: 'Jira Issue Key'
+  type: string
+  default: ''
+
 - name: vm_name
   displayName: 'VM Name'
   type: string
