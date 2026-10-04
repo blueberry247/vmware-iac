@@ -272,6 +272,12 @@ stages:
 
                 terraform output
 
+                VM_IP=$(terraform output -raw vm_ip_address)
+
+                echo "VM IP Address: $VM_IP"
+
+                echo "##vso[task.setvariable variable=PROVISIONED_VM_IP]$VM_IP"
+
             env:
               TF_VAR_vsphere_user: $(VSPHERE_USER)
               TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
