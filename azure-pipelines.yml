@@ -304,11 +304,10 @@ stages:
               script: |
                 set -e
 
-                cd "$(terraformDirectory)"
-
-                VM_NAME=$(terraform output -raw vm_name)
-                VM_IP=$(terraform output -raw vm_ip_address)
-
+                
+                VM_NAME="$VM_NAME_PARAMETER"
+                VM_IP="$PROVISIONED_VM_IP"
+                
                 echo "Updating Jira issue: $JIRA_ISSUE_KEY"
                 echo "VM Name: $VM_NAME"
                 echo "VM IP: $VM_IP"
@@ -385,9 +384,10 @@ stages:
               JIRA_BASE_URL: $(JIRA_BASE_URL)
               JIRA_EMAIL: $(JIRA_EMAIL)
               JIRA_API_TOKEN: $(JIRA_API_TOKEN)
-
               JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
               VM_HOSTNAME: ${{ parameters.vm_hostname }}
+              VM_NAME_PARAMETER: ${{ parameters.vm_name }}
+              PROVISIONED_VM_IP: $(PROVISIONED_VM_IP)
 
                 
 
