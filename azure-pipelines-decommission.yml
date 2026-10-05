@@ -1,0 +1,396 @@
+# ============================================================
+# VMware VM Decommission Pipeline
+#
+# Jira -> Azure DevOps -> Terraform -> VMware
+# ============================================================
+
+parameters:
+
+- name: jira_issue_key
+  displayName: 'Jira Issue Key'
+  type: string
+  default: ''
+
+- name: vm_name
+  displayName: 'VM Name to Decommission'
+  type: string
+  default: ''
+
+
+# Do not run automatically from Git commits
+trigger: none
+
+
+pool:
+  name: VMware-Lab
+
+
+variables:
+
+- group: VMware-Terraform-Secrets
+
+- name: terraformDirectory
+  value: '$(System.DefaultWorkingDirectory)/jira-vm'
+
+
+# ============================================================
+# STAGE 1 - DESTROY PLAN
+# ============================================================
+
+stages:
+
+- stage: DestroyPlan
+  displayName: 'Terraform Destroy Plan'
+
+  condition: |
+    and(
+      succeeded(),
+      ne('${{ parameters.vm_name }}', '')
+    )
+
+  jobs:
+
+  - job: TerraformDestroyPlan
+    displayName: 'Plan VM Decommission'
+
+    steps:
+
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Verify VM State and Create Destroy Plan'
+
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        addSpnToEnvironment: true
+
+        inlineScript: |
+
+          set -e
+
+          # ----------------------------------------------------
+          # Azure authentication for Terraform remote state
+          # ----------------------------------------------------
+
+          export ARM_USE_AZUREAD=true
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+
+          cd "$(terraformDirectory)"
+
+          echo "===================================="
+          echo "VM DECOMMISSION REQUEST"
+          echo "===================================="
+          echo "Jira Issue: $JIRA_ISSUE_KEY"
+          echo "VM Name:    $TF_VAR_vm_name"
+          echo "===================================="
+
+          # ----------------------------------------------------
+          # Connect ONLY to this VM's Terraform state
+          #
+          # Example:
+          # jira-vms/TF-VM-014.tfstate
+          # ----------------------------------------------------
+
+          terraform init \
+            -reconfigure \
+            -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+          echo ""
+          echo "Terraform state:"
+          terraform state list
+
+          # ----------------------------------------------------
+          # SAFETY CHECK 1
+          #
+          # The expected Terraform VM resource must exist.
+          # ----------------------------------------------------
+
+          if ! terraform state list | grep -qx "vsphere_virtual_machine.jira_vm"; then
+            echo "ERROR: No managed Jira VM found in this Terraform state."
+            echo "Destroy cancelled."
+            exit 1
+          fi
+
+          # ----------------------------------------------------
+          # SAFETY CHECK 2
+          #
+          # VM name stored in Terraform state must match
+          # the VM requested through Jira.
+          # ----------------------------------------------------
+
+          STATE_VM_NAME=$(terraform state show -no-color \
+            vsphere_virtual_machine.jira_vm |
+            sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
+            head -1)
+
+          echo ""
+          echo "Requested VM: $TF_VAR_vm_name"
+          echo "State VM:     $STATE_VM_NAME"
+
+          if [ "$STATE_VM_NAME" != "$TF_VAR_vm_name" ]; then
+            echo "ERROR: Requested VM does not match Terraform state."
+            echo "Destroy cancelled."
+            exit 1
+          fi
+
+          echo ""
+          echo "Safety check passed."
+          echo ""
+
+          # ----------------------------------------------------
+          # Create destroy plan ONLY.
+          #
+          # Nothing is destroyed during this stage.
+          # ----------------------------------------------------
+
+          terraform plan \
+            -destroy \
+            -input=false \
+            -out=destroy.tfplan
+
+          echo ""
+          echo "Destroy plan created successfully."
+
+      env:
+
+        # vSphere credentials from Azure DevOps variable group
+        TF_VAR_vsphere_user: $(VSPHERE_USER)
+        TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+        TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+        # VM requested by Jira
+        TF_VAR_vm_name: ${{ parameters.vm_name }}
+
+        # Required by variables.tf even though this is a destroy
+        TF_VAR_vm_hostname: 'decommission'
+        TF_VAR_vm_cpu: '1'
+        TF_VAR_vm_memory: '1024'
+        TF_VAR_vm_network: 'NESTED-MGMT'
+
+        # Jira request
+        JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+
+    # ---------------------------------------------------------
+    # Save the exact destroy plan.
+    #
+    # Stage 2 will apply this SAME plan after approval.
+    # ---------------------------------------------------------
+
+    - publish: $(terraformDirectory)/destroy.tfplan
+      artifact: terraform-destroy-plan
+      displayName: 'Save Terraform Destroy Plan'
+
+
+# ============================================================
+# STAGE 2 - APPROVAL + TERRAFORM DESTROY
+# ============================================================
+
+- stage: Destroy
+  displayName: 'Terraform Destroy'
+
+  dependsOn:
+  - DestroyPlan
+
+  condition: succeeded()
+
+  jobs:
+
+  - deployment: TerraformDestroy
+    displayName: 'Decommission VMware VM'
+
+    # ---------------------------------------------------------
+    # Existing Azure DevOps Environment
+    #
+    # Approval configured on VMware-Production.
+    # Pipeline pauses here before destruction.
+    # ---------------------------------------------------------
+
+    environment: 'VMware-Production'
+
+    strategy:
+
+      runOnce:
+
+        deploy:
+
+          steps:
+
+          - checkout: self
+
+
+          # ----------------------------------------------------
+          # Download the EXACT destroy plan produced in Stage 1
+          # ----------------------------------------------------
+
+          - download: current
+            artifact: terraform-destroy-plan
+            displayName: 'Download Approved Destroy Plan'
+
+
+          # ----------------------------------------------------
+          # Terraform Destroy
+          # ----------------------------------------------------
+
+          - task: AzureCLI@2
+            displayName: 'Destroy VMware VM'
+
+            inputs:
+
+              azureSubscription: 'Azure-Terraform-State'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+
+              inlineScript: |
+
+                set -e
+
+                # ----------------------------------------------
+                # Azure authentication for Terraform state
+                # ----------------------------------------------
+
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
+
+                cd "$(terraformDirectory)"
+
+                echo "===================================="
+                echo "VM DECOMMISSION"
+                echo "===================================="
+                echo "Jira Issue: $JIRA_ISSUE_KEY"
+                echo "VM Name:    $TF_VAR_vm_name"
+                echo "===================================="
+
+                # ----------------------------------------------
+                # Reconnect to EXACTLY the same VM state
+                # ----------------------------------------------
+
+                terraform init \
+                  -reconfigure \
+                  -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+                echo ""
+                echo "Applying approved destroy plan..."
+                echo ""
+
+                # ----------------------------------------------
+                # Apply ONLY the reviewed destroy plan
+                # ----------------------------------------------
+
+                terraform apply \
+                  -input=false \
+                  "$(Pipeline.Workspace)/terraform-destroy-plan/destroy.tfplan"
+
+                echo ""
+                echo "===================================="
+                echo "VM DECOMMISSIONED"
+                echo "===================================="
+                echo "VM Name: $TF_VAR_vm_name"
+                echo "===================================="
+
+            env:
+
+              # vSphere credentials
+              TF_VAR_vsphere_user: $(VSPHERE_USER)
+              TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+              TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+              # Requested VM
+              TF_VAR_vm_name: ${{ parameters.vm_name }}
+
+              # Required Terraform variables
+              TF_VAR_vm_hostname: 'decommission'
+              TF_VAR_vm_cpu: '1'
+              TF_VAR_vm_memory: '1024'
+              TF_VAR_vm_network: 'NESTED-MGMT'
+
+              # Jira request
+              JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+
+          # ====================================================
+          # UPDATE JIRA AFTER SUCCESSFUL DECOMMISSION
+          # ====================================================
+
+          - task: Bash@3
+            displayName: 'Update Jira - VM Decommissioned'
+
+            condition: succeeded()
+
+            inputs:
+
+              targetType: 'inline'
+
+              script: |
+
+                set -e
+
+                echo "Updating Jira issue: $JIRA_ISSUE_KEY"
+
+                JIRA_COMMENT=$(cat <<EOF
+                {
+                  "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "VM decommission completed successfully."
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "VM Name: $VM_NAME"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "The virtual machine was removed automatically by Azure DevOps / Terraform."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+                EOF
+                )
+
+                curl --fail-with-body \
+                  --request POST \
+                  --url "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY/comment" \
+                  --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+                  --header "Accept: application/json" \
+                  --header "Content-Type: application/json" \
+                  --data "$JIRA_COMMENT"
+
+                echo ""
+                echo "Jira updated successfully."
+
+            env:
+
+              JIRA_BASE_URL: $(JIRA_BASE_URL)
+              JIRA_EMAIL: $(JIRA_EMAIL)
+              JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+
+              JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+              VM_NAME: ${{ parameters.vm_name }}
