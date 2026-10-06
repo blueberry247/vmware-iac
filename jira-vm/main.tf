@@ -65,43 +65,28 @@ data "vsphere_virtual_machine" "template" {
 
 # ============================================================
 # Jira Requested VM
+# Provisioned using the reusable VMware VM module
 # ============================================================
 
-resource "vsphere_virtual_machine" "jira_vm" {
-  name             = var.vm_name
+module "vm" {
+  source = "../modules/vm"
+
+  # Jira requested values
+  vm_name     = var.vm_name
+  vm_hostname = var.vm_hostname
+  vm_cpu      = var.vm_cpu
+  vm_memory   = var.vm_memory
+
+  # Existing vSphere infrastructure
   resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
   datastore_id     = data.vsphere_datastore.datastore.id
+  network_id       = data.vsphere_network.network.id
 
-  num_cpus = var.vm_cpu
-  memory   = var.vm_memory
-
-  guest_id  = data.vsphere_virtual_machine.template.guest_id
-  firmware  = "efi"
-  scsi_type = data.vsphere_virtual_machine.template.scsi_type
-
-  network_interface {
-    network_id   = data.vsphere_network.network.id
-    adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-  }
-
-  disk {
-    label            = "disk0"
-    size             = data.vsphere_virtual_machine.template.disks[0].size
-    thin_provisioned = data.vsphere_virtual_machine.template.disks[0].thin_provisioned
-  }
-
-  clone {
-    template_uuid = data.vsphere_virtual_machine.template.id
-  }
-
-  extra_config = {
-    "guestinfo.metadata" = base64encode(
-      yamlencode({
-        "instance-id"    = lower(var.vm_name)
-        "local-hostname" = var.vm_hostname
-      })
-    )
-
-    "guestinfo.metadata.encoding" = "base64"
-  }
+  # Golden template configuration
+  template_id                    = data.vsphere_virtual_machine.template.id
+  template_guest_id              = data.vsphere_virtual_machine.template.guest_id
+  template_scsi_type             = data.vsphere_virtual_machine.template.scsi_type
+  template_network_adapter_type  = data.vsphere_virtual_machine.template.network_interface_types[0]
+  template_disk_size             = data.vsphere_virtual_machine.template.disks[0].size
+  template_disk_thin_provisioned = data.vsphere_virtual_machine.template.disks[0].thin_provisioned
 }

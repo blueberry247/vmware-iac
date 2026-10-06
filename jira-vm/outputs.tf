@@ -1,18 +1,19 @@
 # ============================================================
 # Jira VM Outputs
+# Values returned from the reusable VMware VM module
 # ============================================================
 
 output "vm_name" {
   description = "Name of the VM created from the Jira request"
-  value       = vsphere_virtual_machine.jira_vm.name
+  value       = module.vm.vm_name
 }
 
 output "vm_ip_address" {
   description = "IP address assigned to the VM"
-  value       = vsphere_virtual_machine.jira_vm.default_ip_address
+  value       = module.vm.vm_ip_address
 }
 
 output "vm_uuid" {
   description = "vSphere UUID of the VM"
-  value       = vsphere_virtual_machine.jira_vm.uuid
+  value       = module.vm.vm_uuid
 }
