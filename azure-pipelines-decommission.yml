@@ -107,10 +107,19 @@ stages:
           # ----------------------------------------------------
           # SAFETY CHECK 1
           #
-          # The expected Terraform VM resource must exist.
+          # Support both legacy VM states and VMs provisioned
+          # through the reusable Terraform VM module.
           # ----------------------------------------------------
 
-          if ! terraform state list | grep -qx "vsphere_virtual_machine.jira_vm"; then
+          if terraform state list | grep -qx "module.vm.vsphere_virtual_machine.vm"; then
+            VM_RESOURCE="module.vm.vsphere_virtual_machine.vm"
+            echo "Module-based VM resource found."
+
+          elif terraform state list | grep -qx "vsphere_virtual_machine.jira_vm"; then
+            VM_RESOURCE="vsphere_virtual_machine.jira_vm"
+            echo "Legacy VM resource found."
+
+          else
             echo "ERROR: No managed Jira VM found in this Terraform state."
             echo "Destroy cancelled."
             exit 1
@@ -124,7 +133,7 @@ stages:
           # ----------------------------------------------------
 
           STATE_VM_NAME=$(terraform state show -no-color \
-            vsphere_virtual_machine.jira_vm |
+            "$VM_RESOURCE" |
             sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
             head -1)
 
@@ -132,6 +141,14 @@ stages:
           echo "Requested VM: $TF_VAR_vm_name"
           echo "State VM:     $STATE_VM_NAME"
 
+          # Fail safely if the VM name cannot be read from state
+          if [ -z "$STATE_VM_NAME" ]; then
+            echo "ERROR: Could not determine VM name from Terraform state."
+            echo "Destroy cancelled."
+            exit 1
+          fi
+
+          # The VM in state must exactly match the VM requested by Jira
           if [ "$STATE_VM_NAME" != "$TF_VAR_vm_name" ]; then
             echo "ERROR: Requested VM does not match Terraform state."
             echo "Destroy cancelled."
@@ -139,14 +156,14 @@ stages:
           fi
 
           echo ""
-          echo "Safety check passed."
-          echo ""
+          echo "VM identity verification passed."
 
           # ----------------------------------------------------
-          # Create destroy plan ONLY.
-          #
-          # Nothing is destroyed during this stage.
+          # Create Terraform destroy plan
           # ----------------------------------------------------
+
+          echo ""
+          echo "Creating Terraform destroy plan..."
 
           terraform plan \
             -destroy \
