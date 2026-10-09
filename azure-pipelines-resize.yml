@@ -1,0 +1,211 @@
+# ============================================================
+# VMware VM Resize Pipeline
+# Jira -> Azure DevOps -> Terraform -> VMware
+#
+# Version 1:
+#   - CPU resize
+#   - Memory resize
+# ============================================================
+
+trigger: none
+
+parameters:
+
+- name: jira_issue_key
+  displayName: 'Jira Issue Key'
+  type: string
+  default: ''
+
+- name: vm_name
+  displayName: 'VM Name'
+  type: string
+  default: ''
+
+- name: vm_cpu
+  displayName: 'Requested CPU'
+  type: number
+  default: 2
+
+- name: vm_memory
+  displayName: 'Requested Memory (MB)'
+  type: number
+  default: 2048
+
+
+pool:
+  name: VMware-Lab
+
+
+variables:
+
+- group: VMware-Terraform-Secrets
+
+- name: terraformDirectory
+  value: '$(System.DefaultWorkingDirectory)/jira-vm'
+
+# ============================================================
+# STAGE 1
+# Validate request and create Terraform resize plan
+# ============================================================
+
+stages:
+
+- stage: ResizePlan
+  displayName: 'Terraform Resize Plan'
+
+  condition: |
+    and(
+      succeeded(),
+      ne('${{ parameters.vm_name }}', '')
+    )
+
+  jobs:
+
+  - job: TerraformResizePlan
+    displayName: 'Validate VM and Create Resize Plan'
+
+    steps:
+
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Create Terraform Resize Plan'
+
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+
+        inlineScript: |
+
+          set -e
+
+          # ----------------------------------------------------
+          # Azure authentication for Terraform backend
+          # ----------------------------------------------------
+
+          export ARM_USE_AZUREAD=true
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+
+          cd "$(terraformDirectory)"
+
+          echo "===================================="
+          echo "VM RESIZE REQUEST"
+          echo "===================================="
+          echo "Jira Issue:       $JIRA_ISSUE_KEY"
+          echo "VM Name:          $TF_VAR_vm_name"
+          echo "Requested CPU:    $TF_VAR_vm_cpu"
+          echo "Requested Memory: $TF_VAR_vm_memory MB"
+          echo "===================================="
+
+          # ----------------------------------------------------
+          # Connect ONLY to the requested VM's Terraform state
+          # ----------------------------------------------------
+
+          terraform init \
+            -reconfigure \
+            -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+          echo ""
+          echo "Terraform state:"
+          terraform state list
+
+          # ----------------------------------------------------
+          # SAFETY CHECK 1
+          # This resize pipeline only supports module-based VMs.
+          # ----------------------------------------------------
+
+          VM_RESOURCE="module.vm.vsphere_virtual_machine.vm"
+
+          if ! terraform state list | grep -qx "$VM_RESOURCE"; then
+            echo "ERROR: Module-based VM resource not found in Terraform state."
+            echo "Resize cancelled."
+            exit 1
+          fi
+
+          echo ""
+          echo "Module-based VM resource found."
+
+          # ----------------------------------------------------
+          # SAFETY CHECK 2
+          # State VM name must exactly match the Jira request.
+          # ----------------------------------------------------
+
+          STATE_VM_NAME=$(terraform state show -no-color \
+            "$VM_RESOURCE" |
+            sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
+            head -1)
+
+          echo "Requested VM: $TF_VAR_vm_name"
+          echo "State VM:     $STATE_VM_NAME"
+
+          if [ -z "$STATE_VM_NAME" ]; then
+            echo "ERROR: Could not determine VM name from Terraform state."
+            echo "Resize cancelled."
+            exit 1
+          fi
+
+          if [ "$STATE_VM_NAME" != "$TF_VAR_vm_name" ]; then
+            echo "ERROR: Requested VM does not match Terraform state."
+            echo "Resize cancelled."
+            exit 1
+          fi
+
+          echo ""
+          echo "VM identity verification passed."
+
+          # ----------------------------------------------------
+          # Create the resize plan.
+          #
+          # The existing Terraform module will retain the VM,
+          # template, network and disk configuration.
+          # Only CPU/RAM values supplied by Jira should change.
+          # ----------------------------------------------------
+
+          terraform plan \
+            -input=false \
+            -out=resize.tfplan
+
+          echo ""
+          echo "===================================="
+          echo "RESIZE PLAN"
+          echo "===================================="
+
+          terraform show -no-color resize.tfplan
+
+          echo ""
+          echo "Resize plan created successfully."
+
+      env:
+
+        # vSphere credentials
+        TF_VAR_vsphere_user: $(VSPHERE_USER)
+        TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+        TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+        # Existing VM
+        TF_VAR_vm_name: ${{ parameters.vm_name }}
+
+        # Requested new configuration
+        TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
+        TF_VAR_vm_memory: ${{ parameters.vm_memory }}
+
+        # Existing variables required by the Terraform root module
+        TF_VAR_vm_hostname: 'tf-vm-016'
+        TF_VAR_vm_network: 'NESTED-MGMT'
+
+        # Jira
+        JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+
+    # Save the exact plan for the approval/apply stage.
+    - publish: $(terraformDirectory)/resize.tfplan
+      artifact: terraform-resize-plan
+      displayName: 'Save Terraform Resize Plan'
+
+	
+
