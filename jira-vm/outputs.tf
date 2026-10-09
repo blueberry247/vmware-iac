@@ -17,3 +17,13 @@ output "vm_uuid" {
   description = "vSphere UUID of the VM"
   value       = module.vm.vm_uuid
 }
+
+output "vm_hostname" {
+  description = "Hostname configured for the VM"
+  value       = var.vm_hostname
+}
+
+output "vm_network" {
+  description = "Network configured for the VM"
+  value       = var.vm_network
+}
