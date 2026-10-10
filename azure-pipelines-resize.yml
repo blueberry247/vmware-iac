@@ -206,3 +206,119 @@ stages:
     - publish: $(terraformDirectory)/resize.tfplan
       artifact: terraform-resize-plan
       displayName: 'Save Terraform Resize Plan'
+
+
+# ============================================================
+# STAGE 2
+# Approval gate and apply exact Terraform resize plan
+# ============================================================
+
+- stage: ResizeApply
+  displayName: 'Approve and Apply VM Resize'
+  dependsOn: ResizePlan
+  condition: succeeded()
+
+  jobs:
+
+  - deployment: TerraformResizeApply
+    displayName: 'Apply Approved Resize Plan'
+
+    environment: 'VMware-Resize-Approval'
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - download: current
+            artifact: terraform-resize-plan
+            displayName: 'Download Approved Resize Plan'
+
+          - task: AzureCLI@2
+            displayName: 'Apply Terraform Resize Plan'
+
+            inputs:
+              azureSubscription: 'Azure-Terraform-State'
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+
+              inlineScript: |
+
+                set -e
+
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
+
+                cd "$(terraformDirectory)"
+
+                echo "===================================="
+                echo "APPROVED VM RESIZE"
+                echo "===================================="
+                echo "VM Name:          $TF_VAR_vm_name"
+                echo "Requested CPU:    $TF_VAR_vm_cpu"
+                echo "Requested Memory: $TF_VAR_vm_memory MB"
+                echo "===================================="
+
+                terraform init \
+                  -reconfigure \
+                  -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+                cp "$(Pipeline.Workspace)/terraform-resize-plan/resize.tfplan" \
+                   "$(terraformDirectory)/resize.tfplan"
+
+                echo ""
+                echo "Applying exact approved Terraform plan..."
+
+                terraform apply \
+                  -input=false \
+                  resize.tfplan
+
+                echo ""
+                echo "===================================="
+                echo "VM RESIZE COMPLETED"
+                echo "===================================="
+                echo "VM:     $TF_VAR_vm_name"
+                echo "CPU:    $TF_VAR_vm_cpu"
+                echo "Memory: $TF_VAR_vm_memory MB"
+                echo "===================================="
+
+            env:
+
+              TF_VAR_vsphere_user: $(VSPHERE_USER)
+              TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+              TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+
+              TF_VAR_vm_name: ${{ parameters.vm_name }}
+              TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
+              TF_VAR_vm_memory: ${{ parameters.vm_memory }}
+
+              # Temporary values for TF-VM-016 test
+              TF_VAR_vm_hostname: 'tf-vm-016'
+              TF_VAR_vm_network: 'NESTED-MGMT'
+
+              JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
