@@ -287,106 +287,106 @@ stages:
     # STAGE 2 - APPROVAL + APPLY CPU RESIZE
     # ============================================================
 
-    - stage: CPUResizeApply
-      displayName: 'CPU Resize - Approval and Apply'
-      dependsOn: CPUResizePlan
-      condition: succeeded()
+- stage: CPUResizeApply
+  displayName: 'CPU Resize - Approval and Apply'
+  dependsOn: CPUResizePlan
+  condition: succeeded()
 
-      jobs:
-      - deployment: TerraformCPUResizeApply
-        displayName: 'Apply Approved CPU Resize'
-        pool:
-          name: VMware-Lab
+  jobs:
+  - deployment: TerraformCPUResizeApply
+    displayName: 'Apply Approved CPU Resize'
+    pool:
+      name: VMware-Lab
 
-        environment: 'VMware-Resize-Approval'
+    environment: 'VMware-Resize-Approval'
 
-        strategy:
-          runOnce:
-            deploy:
-              steps:
+    strategy:
+      runOnce:
+        deploy:
+          steps:
 
-              - checkout: self
+          - checkout: self
 
-              - download: current
-                artifact: terraform-cpu-resize-plan
-                displayName: 'Download Approved CPU Resize Plan'
+          - download: current
+            artifact: terraform-cpu-resize-plan
+            displayName: 'Download Approved CPU Resize Plan'
 
-              - task: AzureCLI@2
-                displayName: 'Apply Terraform CPU Resize Plan'
-                inputs:
-                  azureSubscription: 'Azure-Terraform-State'
-                  scriptType: bash
-                  scriptLocation: inlineScript
-                  addSpnToEnvironment: true
+          - task: AzureCLI@2
+            displayName: 'Apply Terraform CPU Resize Plan'
+            inputs:
+              azureSubscription: 'Azure-Terraform-State'
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
 
-                  inlineScript: |
-                    set -euo pipefail
+              inlineScript: |
+                set -euo pipefail
 
-                    cd "$(terraformDirectory)"
+                cd "$(terraformDirectory)"
 
-                    # ----------------------------------------------
-                    # Azure authentication for Terraform backend
-                    # ----------------------------------------------
+                # ----------------------------------------------
+                # Azure authentication for Terraform backend
+                # ----------------------------------------------
 
-                    export ARM_USE_AZUREAD=true
-                    export ARM_USE_OIDC=true
-                    export ARM_CLIENT_ID="$servicePrincipalId"
-                    export ARM_TENANT_ID="$tenantId"
-                    export ARM_OIDC_TOKEN="$idToken"
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
 
-                    # ----------------------------------------------
-                    # VMware credentials
-                    # ----------------------------------------------
+                # ----------------------------------------------
+                # VMware credentials
+                # ----------------------------------------------
 
-                    export TF_VAR_vsphere_user="$VSPHERE_USER"
-                    export TF_VAR_vsphere_password="$VSPHERE_PASSWORD"
-                    export TF_VAR_vsphere_server="$VSPHERE_SERVER"
+                export TF_VAR_vsphere_user="$VSPHERE_USER"
+                export TF_VAR_vsphere_password="$VSPHERE_PASSWORD"
+                export TF_VAR_vsphere_server="$VSPHERE_SERVER"
 
-                    export TF_VAR_vm_name="${{ parameters.vm_name }}"
+                export TF_VAR_vm_name="${{ parameters.vm_name }}"
 
-                    echo "===================================="
-                    echo "CPU RESIZE APPLY"
-                    echo "===================================="
-                    echo "VM:            $TF_VAR_vm_name"
-                    echo "Requested CPU: ${{ parameters.vm_cpu }}"
-                    echo "Jira Issue:    ${{ parameters.jira_issue_key }}"
-                    echo "===================================="
+                echo "===================================="
+                echo "CPU RESIZE APPLY"
+                echo "===================================="
+                echo "VM:            $TF_VAR_vm_name"
+                echo "Requested CPU: ${{ parameters.vm_cpu }}"
+                echo "Jira Issue:    ${{ parameters.jira_issue_key }}"
+                echo "===================================="
 
-                    # ----------------------------------------------
-                    # Connect to the same per-VM Terraform state
-                    # ----------------------------------------------
+                # ----------------------------------------------
+                # Connect to the same per-VM Terraform state
+                # ----------------------------------------------
 
-                    terraform init \
-                      -input=false \
-                      -reconfigure \
-                      -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+                terraform init \
+                  -input=false \
+                  -reconfigure \
+                  -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
-                    # ----------------------------------------------
-                    # Use EXACT plan produced by Stage 1
-                    # ----------------------------------------------
+                # ----------------------------------------------
+                # Use EXACT plan produced by Stage 1
+                # ----------------------------------------------
 
-                    cp "$(Pipeline.Workspace)/terraform-cpu-resize-plan/cpu-resize.tfplan" \
-                      "$(terraformDirectory)/cpu-resize.tfplan"
+                cp "$(Pipeline.Workspace)/terraform-cpu-resize-plan/cpu-resize.tfplan" \
+                  "$(terraformDirectory)/cpu-resize.tfplan"
 
-                    echo "===================================="
-                    echo "APPLYING APPROVED CPU PLAN"
-                    echo "===================================="
+                echo "===================================="
+                echo "APPLYING APPROVED CPU PLAN"
+                echo "===================================="
 
-                    terraform apply \
-                      -input=false \
-                      cpu-resize.tfplan
+                terraform apply \
+                  -input=false \
+                  cpu-resize.tfplan
 
-                    echo "===================================="
-                    echo "CPU RESIZE COMPLETED"
-                    echo "===================================="
-                    echo "VM:  $TF_VAR_vm_name"
-                    echo "CPU: ${{ parameters.vm_cpu }}"
-                    echo "===================================="
+                echo "===================================="
+                echo "CPU RESIZE COMPLETED"
+                echo "===================================="
+                echo "VM:  $TF_VAR_vm_name"
+                echo "CPU: ${{ parameters.vm_cpu }}"
+                echo "===================================="
 
-                env:
-                  VSPHERE_USER: $(VSPHERE_USER)
-                  VSPHERE_PASSWORD: $(VSPHERE_PASSWORD)
-                  VSPHERE_SERVER: $(VSPHERE_SERVER)
+            env:
+              VSPHERE_USER: $(VSPHERE_USER)
+              VSPHERE_PASSWORD: $(VSPHERE_PASSWORD)
+              VSPHERE_SERVER: $(VSPHERE_SERVER)
           
 
 
