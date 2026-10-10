@@ -1,0 +1,393 @@
+trigger: none
+
+parameters:
+- name: jira_issue_key
+  displayName: 'Jira Issue Key'
+  type: string
+  default: ''
+
+- name: vm_name
+  displayName: 'VM Name'
+  type: string
+  default: ''
+
+- name: vm_cpu
+  displayName: 'Requested CPU'
+  type: number
+  default: 2
+
+variables:
+- group: VMware-Terraform-Secrets
+
+- name: terraformDirectory
+  value: '$(System.DefaultWorkingDirectory)/jira-vm'
+
+
+stages:
+- stage: CPUResizePlan
+  displayName: 'CPU Resize - Terraform Plan'
+
+  jobs:
+  - job: TerraformCPUResizePlan
+    displayName: 'Create CPU Resize Plan'
+
+    pool:
+      name: VMware-Lab
+
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Create Terraform CPU Resize Plan'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+
+        inlineScript: |
+          set -euo pipefail
+
+          cd "$(terraformDirectory)"
+
+          # --------------------------------------------------
+          # Azure authentication for Terraform backend
+          # --------------------------------------------------
+
+          export ARM_USE_AZUREAD=true
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+
+          # --------------------------------------------------
+          # VMware credentials
+          # --------------------------------------------------
+
+          export TF_VAR_vsphere_user="$VSPHERE_USER"
+          export TF_VAR_vsphere_password="$VSPHERE_PASSWORD"
+          export TF_VAR_vsphere_server="$VSPHERE_SERVER"
+
+          # --------------------------------------------------
+          # Values supplied by the CPU resize request
+          # --------------------------------------------------
+
+          export TF_VAR_vm_name="${{ parameters.vm_name }}"
+          export TF_VAR_vm_cpu="${{ parameters.vm_cpu }}"
+
+          echo "===================================="
+          echo "CPU RESIZE REQUEST"
+          echo "===================================="
+          echo "Jira Issue:    ${{ parameters.jira_issue_key }}"
+          echo "VM:            $TF_VAR_vm_name"
+          echo "Requested CPU: $TF_VAR_vm_cpu"
+          echo "===================================="
+
+          # --------------------------------------------------
+          # Connect to this VM's individual Terraform state
+          # --------------------------------------------------
+
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+          echo "===================================="
+          echo "READING CURRENT VM CONFIGURATION"
+          echo "===================================="
+
+          VM_RESOURCE="module.vm.vsphere_virtual_machine.vm"
+
+          # --------------------------------------------------
+          # Guardrail 1:
+          # VM must exist in this Terraform state
+          # --------------------------------------------------
+
+          if ! terraform state list | grep -qx "$VM_RESOURCE"; then
+            echo "ERROR: VM resource not found in Terraform state."
+            echo "CPU resize cancelled."
+            exit 1
+          fi
+
+          # --------------------------------------------------
+          # Guardrail 2:
+          # State VM must match requested VM
+          # --------------------------------------------------
+
+          STATE_VM_NAME=$(terraform state show -no-color "$VM_RESOURCE" |
+            sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
+            head -1)
+
+          if [ -z "$STATE_VM_NAME" ]; then
+            echo "ERROR: Could not determine VM name from Terraform state."
+            echo "CPU resize cancelled."
+            exit 1
+          fi
+
+          if [ "$STATE_VM_NAME" != "$TF_VAR_vm_name" ]; then
+            echo "ERROR: Requested VM does not match Terraform state."
+            echo "Requested VM: $TF_VAR_vm_name"
+            echo "State VM:     $STATE_VM_NAME"
+            echo "CPU resize cancelled."
+            exit 1
+          fi
+
+          # --------------------------------------------------
+          # Read existing lifecycle configuration from state
+          # --------------------------------------------------
+
+          CURRENT_CPU=$(terraform output -raw vm_cpu)
+          CURRENT_MEMORY=$(terraform output -raw vm_memory)
+          CURRENT_HOSTNAME=$(terraform output -raw vm_hostname)
+          CURRENT_NETWORK=$(terraform output -raw vm_network)
+
+          echo "Current CPU:     $CURRENT_CPU"
+          echo "Requested CPU:   $TF_VAR_vm_cpu"
+          echo "Current Memory:  $CURRENT_MEMORY MB"
+          echo "Hostname:        $CURRENT_HOSTNAME"
+          echo "Network:         $CURRENT_NETWORK"
+
+          # --------------------------------------------------
+          # Preserve everything except CPU
+          # --------------------------------------------------
+
+          export TF_VAR_vm_memory="$CURRENT_MEMORY"
+          export TF_VAR_vm_hostname="$CURRENT_HOSTNAME"
+          export TF_VAR_vm_network="$CURRENT_NETWORK"
+
+          # --------------------------------------------------
+          # Guardrail 3:
+          # Requested CPU must be different
+          # --------------------------------------------------
+
+          if [ "$TF_VAR_vm_cpu" -eq "$CURRENT_CPU" ]; then
+            echo "ERROR: Requested CPU is already $CURRENT_CPU."
+            echo "No CPU resize is required."
+            exit 1
+          fi
+
+          # --------------------------------------------------
+          # Guardrail 4:
+          # This pipeline permits CPU increases only.
+          # CPU reductions require controlled shutdown.
+          # --------------------------------------------------
+
+          if [ "$TF_VAR_vm_cpu" -lt "$CURRENT_CPU" ]; then
+            echo "ERROR: CPU reduction requested."
+            echo "Current CPU:   $CURRENT_CPU"
+            echo "Requested CPU: $TF_VAR_vm_cpu"
+            echo ""
+            echo "Live CPU removal is not permitted by this pipeline."
+            echo "Use the controlled shutdown resize workflow."
+            exit 1
+          fi
+
+          echo "===================================="
+          echo "CPU RESIZE VALIDATION PASSED"
+          echo "===================================="
+          echo "VM:      $TF_VAR_vm_name"
+          echo "CPU:     $CURRENT_CPU -> $TF_VAR_vm_cpu"
+          echo "Memory:  $CURRENT_MEMORY MB (unchanged)"
+          echo "Hostname: $CURRENT_HOSTNAME (unchanged)"
+          echo "Network:  $CURRENT_NETWORK (unchanged)"
+          echo "===================================="
+
+          # --------------------------------------------------
+          # Create CPU-only Terraform plan
+          # --------------------------------------------------
+
+          echo "===================================="
+          echo "CREATING CPU RESIZE PLAN"
+          echo "===================================="
+
+          terraform plan \
+            -input=false \
+            -out=cpu-resize.tfplan
+
+          echo "===================================="
+          echo "CPU RESIZE PLAN"
+          echo "===================================="
+
+          terraform show -no-color cpu-resize.tfplan
+
+
+          # --------------------------------------------------
+          # Guardrail 5:
+          # Verify Terraform is changing CPU only
+          # --------------------------------------------------
+
+          echo "===================================="
+          echo "VALIDATING CPU-ONLY PLAN"
+          echo "===================================="
+
+          terraform show -json cpu-resize.tfplan > cpu-resize-plan.json
+
+          python3 - <<'PY'
+          import json
+          import sys
+
+          RESOURCE = "module.vm.vsphere_virtual_machine.vm"
+
+          with open("cpu-resize-plan.json", "r") as f:
+              plan = json.load(f)
+
+          changes = [
+              r for r in plan.get("resource_changes", [])
+              if r.get("address") == RESOURCE
+          ]
+
+          if len(changes) != 1:
+              print("ERROR: Expected exactly one VM resource change.")
+              sys.exit(1)
+
+          change = changes[0]["change"]
+          actions = change.get("actions", [])
+
+          if actions != ["update"]:
+              print(f"ERROR: Unsafe Terraform action detected: {actions}")
+              print("Only an in-place update is permitted.")
+              sys.exit(1)
+
+          before = change.get("before") or {}
+          after = change.get("after") or {}
+
+          changed = {
+              key
+              for key in set(before) | set(after)
+              if before.get(key) != after.get(key)
+          }
+
+          print("Changed VM attributes:", sorted(changed))
+
+          if changed != {"num_cpus"}:
+              print("ERROR: CPU resize plan contains non-CPU changes.")
+              print("Expected: ['num_cpus']")
+              print("Detected:", sorted(changed))
+              sys.exit(1)
+
+          print("CPU-only plan validation PASSED.")
+          print(f"CPU: {before.get('num_cpus')} -> {after.get('num_cpus')}")
+          PY
+
+          echo "===================================="
+          echo "CPU-ONLY PLAN APPROVED FOR REVIEW"
+          echo "===================================="
+
+      env:
+        VSPHERE_USER: $(VSPHERE_USER)
+        VSPHERE_PASSWORD: $(VSPHERE_PASSWORD)
+        VSPHERE_SERVER: $(VSPHERE_SERVER)
+
+    - publish: $(terraformDirectory)/cpu-resize.tfplan
+      artifact: terraform-cpu-resize-plan
+      displayName: 'Save Terraform CPU Resize Plan'
+
+
+    # ============================================================
+    # STAGE 2 - APPROVAL + APPLY CPU RESIZE
+    # ============================================================
+
+    - stage: CPUResizeApply
+      displayName: 'CPU Resize - Approval and Apply'
+      dependsOn: CPUResizePlan
+      condition: succeeded()
+
+      jobs:
+      - deployment: TerraformCPUResizeApply
+        displayName: 'Apply Approved CPU Resize'
+        pool:
+          name: VMware-Lab
+
+        environment: 'VMware-Resize-Approval'
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+              - checkout: self
+
+              - download: current
+                artifact: terraform-cpu-resize-plan
+                displayName: 'Download Approved CPU Resize Plan'
+
+              - task: AzureCLI@2
+                displayName: 'Apply Terraform CPU Resize Plan'
+                inputs:
+                  azureSubscription: 'Azure-Terraform-State'
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  addSpnToEnvironment: true
+
+                  inlineScript: |
+                    set -euo pipefail
+
+                    cd "$(terraformDirectory)"
+
+                    # ----------------------------------------------
+                    # Azure authentication for Terraform backend
+                    # ----------------------------------------------
+
+                    export ARM_USE_AZUREAD=true
+                    export ARM_USE_OIDC=true
+                    export ARM_CLIENT_ID="$servicePrincipalId"
+                    export ARM_TENANT_ID="$tenantId"
+                    export ARM_OIDC_TOKEN="$idToken"
+
+                    # ----------------------------------------------
+                    # VMware credentials
+                    # ----------------------------------------------
+
+                    export TF_VAR_vsphere_user="$VSPHERE_USER"
+                    export TF_VAR_vsphere_password="$VSPHERE_PASSWORD"
+                    export TF_VAR_vsphere_server="$VSPHERE_SERVER"
+
+                    export TF_VAR_vm_name="${{ parameters.vm_name }}"
+
+                    echo "===================================="
+                    echo "CPU RESIZE APPLY"
+                    echo "===================================="
+                    echo "VM:            $TF_VAR_vm_name"
+                    echo "Requested CPU: ${{ parameters.vm_cpu }}"
+                    echo "Jira Issue:    ${{ parameters.jira_issue_key }}"
+                    echo "===================================="
+
+                    # ----------------------------------------------
+                    # Connect to the same per-VM Terraform state
+                    # ----------------------------------------------
+
+                    terraform init \
+                      -input=false \
+                      -reconfigure \
+                      -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+                    # ----------------------------------------------
+                    # Use EXACT plan produced by Stage 1
+                    # ----------------------------------------------
+
+                    cp "$(Pipeline.Workspace)/terraform-cpu-resize-plan/cpu-resize.tfplan" \
+                      "$(terraformDirectory)/cpu-resize.tfplan"
+
+                    echo "===================================="
+                    echo "APPLYING APPROVED CPU PLAN"
+                    echo "===================================="
+
+                    terraform apply \
+                      -input=false \
+                      cpu-resize.tfplan
+
+                    echo "===================================="
+                    echo "CPU RESIZE COMPLETED"
+                    echo "===================================="
+                    echo "VM:  $TF_VAR_vm_name"
+                    echo "CPU: ${{ parameters.vm_cpu }}"
+                    echo "===================================="
+
+                env:
+                  VSPHERE_USER: $(VSPHERE_USER)
+                  VSPHERE_PASSWORD: $(VSPHERE_PASSWORD)
+                  VSPHERE_SERVER: $(VSPHERE_SERVER)
+          
+
+
+
