@@ -6,6 +6,9 @@ resource "vsphere_virtual_machine" "vm" {
   num_cpus = var.vm_cpu
   memory   = var.vm_memory
 
+  cpu_hot_add_enabled    = true
+  memory_hot_add_enabled = true
+
   guest_id  = var.template_guest_id
   firmware  = "efi"
   scsi_type = var.template_scsi_type
