@@ -8,6 +8,7 @@ resource "vsphere_virtual_machine" "vm" {
 
   cpu_hot_add_enabled    = true
   memory_hot_add_enabled = true
+  vvtd_enabled           = true
 
   guest_id  = var.template_guest_id
   firmware  = "efi"
