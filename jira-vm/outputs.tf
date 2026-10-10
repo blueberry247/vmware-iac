@@ -27,3 +27,13 @@ output "vm_network" {
   description = "Network configured for the VM"
   value       = var.vm_network
 }
+
+output "vm_cpu" {
+  description = "CPU configured for the VM"
+  value       = var.vm_cpu
+}
+
+output "vm_memory" {
+  description = "Memory configured for the VM in MB"
+  value       = var.vm_memory
+}
