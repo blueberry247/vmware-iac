@@ -206,6 +206,3 @@ stages:
     - publish: $(terraformDirectory)/resize.tfplan
       artifact: terraform-resize-plan
       displayName: 'Save Terraform Resize Plan'
-
-	
-
