@@ -68,7 +68,12 @@ stages:
 
         inlineScript: |
 
-          set -e
+          set -euo pipefail
+
+          # Restrict plan-file permissions and remove plaintext on exit.
+          umask 077
+          rm -f "$(terraformDirectory)/destroy.tfplan" "$(terraformDirectory)/destroy.tfplan.gpg"
+          trap 'rm -f destroy.tfplan' EXIT
 
           # ----------------------------------------------------
           # Azure authentication for Terraform remote state
@@ -88,6 +93,12 @@ stages:
           echo "Jira Issue: $JIRA_ISSUE_KEY"
           echo "VM Name:    $TF_VAR_vm_name"
           echo "===================================="
+
+          # Prevent malformed VM names being used as state-file paths.
+          if [[ ! "$TF_VAR_vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "ERROR: Invalid VM name; destroy cancelled."
+            exit 1
+          fi
 
           # ----------------------------------------------------
           # Connect ONLY to this VM's Terraform state
@@ -159,19 +170,71 @@ stages:
           echo "VM identity verification passed."
 
           # ----------------------------------------------------
-          # Create Terraform destroy plan
+          # Detect the OS from THIS VM's Terraform state.
+          # Windows states contain the conditional Windows template.
+          # Debian states contain only the default Debian lookup.
+          # Doing this automatically avoids accidentally using the
+          # Debian 20 GB disk definition for a 90 GB Windows VM.
           # ----------------------------------------------------
 
-          echo ""
-          echo "Creating Terraform destroy plan..."
+          if terraform state list | grep -Fxq 'data.vsphere_virtual_machine.windows_template[0]'; then
+            export TF_VAR_vm_os='Windows Server 2022'
+          elif terraform state list | grep -Fxq 'data.vsphere_virtual_machine.template'; then
+            export TF_VAR_vm_os='Debian 13'
+          else
+            echo "ERROR: Unable to establish Windows/Debian template from state."
+            echo "Destroy cancelled."
+            exit 1
+          fi
+          echo "Operating system selected from state: $TF_VAR_vm_os"
 
+          # ----------------------------------------------------
+          # Create a destroy-only plan; do not apply anything here.
+          # ----------------------------------------------------
+          echo "Creating Terraform destroy plan..."
           terraform plan \
             -destroy \
             -input=false \
             -out=destroy.tfplan
 
-          echo ""
-          echo "Destroy plan created successfully."
+          # ----------------------------------------------------
+          # SAFETY CHECK 3: The *only* managed resource action
+          # must be deletion of the VM verified above.
+          # Do not print the plan JSON: it can contain secrets.
+          # ----------------------------------------------------
+          python3 - "$VM_RESOURCE" <<'PY_CHECK_PLAN'
+          import json
+          import subprocess
+          import sys
+
+          target = sys.argv[1]
+          plan = json.loads(subprocess.check_output(
+              ['terraform', 'show', '-json', 'destroy.tfplan']
+          ))
+          actions = [
+              (r['address'], r['change']['actions'])
+              for r in plan.get('resource_changes', [])
+              if r.get('mode') == 'managed'
+              and r['change']['actions'] != ['no-op']
+          ]
+          if actions != [(target, ['delete'])]:
+              print('ERROR: Destroy plan does not contain exactly one expected VM deletion.')
+              print('Managed actions:', [(a, acts) for a, acts in actions])
+              sys.exit(1)
+          print('Safety check passed: exactly one VM deletion planned:', target)
+          PY_CHECK_PLAN
+
+          # ----------------------------------------------------
+          # Encrypt the saved plan before publishing it as an
+          # artifact, as we do in the provisioning pipeline.
+          # ----------------------------------------------------
+          : "${TF_PLAN_PASSPHRASE:?Missing Terraform plan encryption passphrase}"
+          printf '%s' "$TF_PLAN_PASSPHRASE" | \
+            gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --symmetric --cipher-algo AES256 \
+              --output destroy.tfplan.gpg destroy.tfplan
+          rm -f destroy.tfplan
+          echo "Encrypted destroy plan created successfully."
 
       env:
 
@@ -179,6 +242,8 @@ stages:
         TF_VAR_vsphere_user: $(VSPHERE_USER)
         TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
         TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+        TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+        TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
 
         # VM requested by Jira
         TF_VAR_vm_name: ${{ parameters.vm_name }}
@@ -194,14 +259,14 @@ stages:
 
 
     # ---------------------------------------------------------
-    # Save the exact destroy plan.
+    # Publish only the encrypted plan.
     #
-    # Stage 2 will apply this SAME plan after approval.
+    # Stage 2 decrypts and applies the SAME plan after approval.
     # ---------------------------------------------------------
 
-    - publish: $(terraformDirectory)/destroy.tfplan
+    - publish: $(terraformDirectory)/destroy.tfplan.gpg
       artifact: terraform-destroy-plan
-      displayName: 'Save Terraform Destroy Plan'
+      displayName: 'Save Encrypted Terraform Destroy Plan'
 
 
 # ============================================================
@@ -266,7 +331,11 @@ stages:
 
               inlineScript: |
 
-                set -e
+                set -euo pipefail
+
+                # Protect decrypted plan and clean up when task exits.
+                umask 077
+                trap 'rm -f destroy.tfplan' EXIT
 
                 # ----------------------------------------------
                 # Azure authentication for Terraform state
@@ -296,16 +365,20 @@ stages:
                   -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
                 echo ""
+                echo "Decrypting the approved destroy plan..."
+
+                : "${TF_PLAN_PASSPHRASE:?Missing Terraform plan encryption passphrase}"
+                printf '%s' "$TF_PLAN_PASSPHRASE" | \
+                  gpg --batch --yes --pinentry-mode loopback \
+                    --passphrase-fd 0 --decrypt \
+                    --output destroy.tfplan \
+                    "$(Pipeline.Workspace)/terraform-destroy-plan/destroy.tfplan.gpg"
+                chmod 600 destroy.tfplan
+
+                # Apply ONLY the exact destroy plan approved above.
+                # No second planning step or separate destroy command.
                 echo "Applying approved destroy plan..."
-                echo ""
-
-                # ----------------------------------------------
-                # Apply ONLY the reviewed destroy plan
-                # ----------------------------------------------
-
-                terraform apply \
-                  -input=false \
-                  "$(Pipeline.Workspace)/terraform-destroy-plan/destroy.tfplan"
+                terraform apply -input=false destroy.tfplan
 
                 echo ""
                 echo "===================================="
@@ -320,6 +393,8 @@ stages:
               TF_VAR_vsphere_user: $(VSPHERE_USER)
               TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
               TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+              TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+              TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
 
               # Requested VM
               TF_VAR_vm_name: ${{ parameters.vm_name }}
