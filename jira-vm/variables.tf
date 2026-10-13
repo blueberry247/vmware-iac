@@ -47,3 +47,19 @@ variable "vm_network" {
   description = "vSphere network"
   type        = string
 }
+variable "vm_os" {
+  description = "Operating system selected in Jira"
+  type        = string
+  default     = "Debian 13"
+
+  validation {
+    condition     = contains(["Debian 13", "Windows Server 2022"], var.vm_os)
+    error_message = "Operating system must be Debian 13 or Windows Server 2022."
+  }
+}
+variable "windows_admin_password" {
+  description = "Administrator password for Windows Server 2022"
+  type        = string
+  sensitive   = true
+  default     = null
+}

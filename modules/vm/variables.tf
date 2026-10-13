@@ -62,3 +62,19 @@ variable "template_disk_thin_provisioned" {
   description = "Whether the template disk uses thin provisioning"
   type        = bool
 }
+variable "vm_os" {
+  description = "Operating system requested through Jira"
+  type        = string
+  default     = "Debian 13"
+
+  validation {
+    condition     = contains(["Debian 13", "Windows Server 2022"], var.vm_os)
+    error_message = "Operating system must be Debian 13 or Windows Server 2022."
+  }
+}
+variable "windows_admin_password" {
+  description = "Administrator password for Windows Server 2022"
+  type        = string
+  sensitive   = true
+  default     = null
+}

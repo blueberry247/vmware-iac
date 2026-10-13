@@ -64,6 +64,45 @@ data "vsphere_virtual_machine" "template" {
 }
 
 # ============================================================
+# WINDOWS SERVER 2022 GOLDEN TEMPLATE
+# ============================================================
+#
+# Locate the Windows Server 2022 template in vCenter.
+#
+# Datacenter: FB-Datacentre
+# Folder:     FB-Datacentre/Windows-Templates
+# Template:   WIN2022-TEMPLATE
+#
+# This template will be used whenever Jira requests
+# Windows Server 2022.
+#
+# ============================================================
+
+data "vsphere_virtual_machine" "windows_template" {
+
+  # Only search for this template when Windows is requested
+  count = var.vm_os == "Windows Server 2022" ? 1 : 0
+
+  # Full inventory path relative to the datacenter
+  name = "FB-Datacentre/Windows-Templates/WIN2022-TEMPLATE"
+
+  # VMware datacenter containing the template
+  datacenter_id = data.vsphere_datacenter.dc.id
+
+}
+
+# ============================================================
+# Windows Server 2022 Datastore
+# ============================================================
+
+data "vsphere_datastore" "windows_datastore" {
+  count         = var.vm_os == "Windows Server 2022" ? 1 : 0
+  name          = "Esxi-1-142GB"
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
+
+# ============================================================
 # Jira Requested VM
 # Provisioned using the reusable VMware VM module
 # ============================================================
@@ -72,21 +111,41 @@ module "vm" {
   source = "../modules/vm"
 
   # Jira requested values
-  vm_name     = var.vm_name
-  vm_hostname = var.vm_hostname
-  vm_cpu      = var.vm_cpu
-  vm_memory   = var.vm_memory
+  vm_name                = var.vm_name
+  vm_hostname            = var.vm_hostname
+  vm_cpu                 = var.vm_cpu
+  vm_memory              = var.vm_memory
+  vm_os                  = var.vm_os
+  windows_admin_password = var.windows_admin_password
 
   # Existing vSphere infrastructure
   resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
-  datastore_id     = data.vsphere_datastore.datastore.id
+  datastore_id     = local.selected_datastore_id
   network_id       = data.vsphere_network.network.id
 
-  # Golden template configuration
-  template_id                    = data.vsphere_virtual_machine.template.id
-  template_guest_id              = data.vsphere_virtual_machine.template.guest_id
-  template_scsi_type             = data.vsphere_virtual_machine.template.scsi_type
-  template_network_adapter_type  = data.vsphere_virtual_machine.template.network_interface_types[0]
-  template_disk_size             = data.vsphere_virtual_machine.template.disks[0].size
-  template_disk_thin_provisioned = data.vsphere_virtual_machine.template.disks[0].thin_provisioned
+  # Automatically select the correct golden template
+  template_id                    = local.selected_template.id
+  template_guest_id              = local.selected_template.guest_id
+  template_scsi_type             = local.selected_template.scsi_type
+  template_network_adapter_type  = local.selected_template.network_interface_types[0]
+  template_disk_size             = local.selected_template.disks[0].size
+  template_disk_thin_provisioned = local.selected_template.disks[0].thin_provisioned
+}
+
+# ============================================================
+# AUTOMATIC OS SELECTION - WINDOWS OR DEBIAN
+# ============================================================
+
+locals {
+  is_windows = var.vm_os == "Windows Server 2022"
+
+  # Select the correct VMware template
+  selected_template = local.is_windows ? (
+    data.vsphere_virtual_machine.windows_template[0]
+  ) : data.vsphere_virtual_machine.template
+
+  # Select the correct datastore
+  selected_datastore_id = local.is_windows ? (
+    data.vsphere_datastore.windows_datastore[0].id
+  ) : data.vsphere_datastore.datastore.id
 }

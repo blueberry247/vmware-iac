@@ -20,3 +20,13 @@ override.tf.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Terraform plan files
+tfplan
+tfplan.gpg
+*.tfplan
+
+# Local backups and reviews
+terraform-state-backup.json
+terraform-plan-review.txt
+azure-pipelines-backup.yml
