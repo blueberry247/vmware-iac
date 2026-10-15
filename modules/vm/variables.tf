@@ -78,3 +78,13 @@ variable "windows_admin_password" {
   sensitive   = true
   default     = null
 }
+
+# ============================================================
+# ANSIBLE SSH PUBLIC KEY - DEBIAN 13
+# ============================================================
+
+variable "ansible_ssh_public_key" {
+  description = "SSH public key authorised for Ansible access to Debian VMs"
+  type        = string
+  default     = null
+}

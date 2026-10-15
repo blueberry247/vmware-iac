@@ -132,15 +132,24 @@ resource "vsphere_virtual_machine" "vm" {
 
   lifecycle {
 
+    # Windows Server 2022 requires an Administrator password
     precondition {
-
       condition = var.vm_os == "Windows Server 2022" ? (
         var.windows_admin_password != null ?
         length(trimspace(var.windows_admin_password)) > 0 : false
       ) : true
 
       error_message = "Windows Server 2022 requires an Administrator password."
+    }
 
+    # Debian 13 requires an Ansible SSH public key
+    precondition {
+      condition = var.vm_os == "Debian 13" ? (
+        var.ansible_ssh_public_key != null ?
+        length(trimspace(var.ansible_ssh_public_key)) > 0 : false
+      ) : true
+
+      error_message = "Debian 13 requires an Ansible SSH public key."
     }
 
   }
@@ -398,71 +407,41 @@ resource "vsphere_virtual_machine" "vm" {
 
   }
 
+  # ============================================================
+  # DEBIAN 13 - CLOUD-INIT AND ANSIBLE SSH ACCESS
+  # ============================================================
 
-  # ==========================================================
-  # 10. VMWARE EXTRA CONFIGURATION - GUEST METADATA
-  # ==========================================================
-  #
-  # Extra configuration allows metadata to be passed
-  # into the virtual machine's VMware configuration.
-  #
-  # This section prepares guestinfo metadata which can
-  # be consumed by supported guest configuration tools.
-  #
-  # IMPORTANT:
-  #   These settings do not automatically configure the
-  #   operating system.
-  #
-  #   A compatible guest agent, such as appropriately
-  #   configured cloud-init, is required to consume them.
-  #
-  # ==========================================================
+  extra_config = var.vm_os == "Debian 13" ? merge(
 
-  extra_config = {
-
-
-    # --------------------------------------------------------
-    # GUEST METADATA
-    # --------------------------------------------------------
-    #
-    # instance-id:
-    #   Unique identifier based on the VM name.
-    #
-    # local-hostname:
-    #   Requested hostname for the virtual machine.
-    #
-    # yamlencode:
-    #   Converts the values into YAML.
-    #
-    # base64encode:
-    #   Converts the YAML into Base64.
-    #
-    # --------------------------------------------------------
-
-    "guestinfo.metadata" = base64encode(
-
-      yamlencode({
-
-        "instance-id" = lower(var.vm_name)
-
+    # VMware guest metadata
+    {
+      "guestinfo.metadata" = base64encode(yamlencode({
+        "instance-id"    = lower(var.vm_name)
         "local-hostname" = var.vm_hostname
+      }))
 
-      })
+      "guestinfo.metadata.encoding" = "base64"
+    },
 
-    )
+    # Install ANSIBLE-01 SSH public key when provided
+    var.ansible_ssh_public_key != null ? {
 
+      "guestinfo.userdata" = base64encode(
+        "#cloud-config\n" + yamlencode({
+          users = [
+            "default",
+            {
+              name                = "bardfox"
+              ssh_authorized_keys = [var.ansible_ssh_public_key]
+            }
+          ]
+        })
+      )
 
-    # --------------------------------------------------------
-    # METADATA ENCODING
-    # --------------------------------------------------------
-    #
-    # Tells compatible guest software that the metadata
-    # has been encoded using Base64.
-    #
-    # --------------------------------------------------------
+      "guestinfo.userdata.encoding" = "base64"
 
-    "guestinfo.metadata.encoding" = "base64"
+    } : {}
 
-  }
+  ) : {}
 
 }

@@ -55,8 +55,8 @@ parameters:
 # Pipeline settings
 # -----------------------------------------------------------
 
-trigger:
-- main
+# VM provisioning is triggered by Jira or manually
+trigger: none
 
 pool:
   name: VMware-Lab
@@ -219,6 +219,7 @@ stages:
         TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
         TF_VAR_vm_os: ${{ parameters.vm_os }}
         TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+        TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
 
         TF_VAR_vm_name: ${{ parameters.vm_name }}
         TF_VAR_vm_hostname: ${{ parameters.vm_hostname }}
@@ -369,6 +370,7 @@ stages:
 
               TF_VAR_vm_os: ${{ parameters.vm_os }}
               TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+              TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
               TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
               TF_VAR_vm_name: ${{ parameters.vm_name }}
               TF_VAR_vm_hostname: ${{ parameters.vm_hostname }}
@@ -408,7 +410,7 @@ stages:
                 python3 - <<'PY' | ssh \
                   -o BatchMode=yes \
                   -o StrictHostKeyChecking=yes \
-                  bardfox@192.168.1.110 '
+                  bardfox@192.168.1.113 '
                     set -eu
                     umask 077
 
@@ -444,6 +446,65 @@ stages:
             env:
               VM_IP: $(PROVISIONED_VM_IP)
               WINDOWS_ADMIN_PASSWORD: $(WINDOWS_ADMIN_PASSWORD)
+
+
+          # ====================================================
+          # ANSIBLE - DEBIAN 13 READINESS
+          # ====================================================
+
+          - task: Bash@3
+            displayName: 'Ansible - Verify Debian 13 readiness'
+
+            condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Debian 13'))
+
+            inputs:
+              targetType: 'inline'
+
+              script: |
+                set -euo pipefail
+
+                echo "===================================="
+                echo "ANSIBLE DEBIAN 13 READINESS"
+                echo "===================================="
+
+                : "${VM_IP:?Missing VM IP address}"
+
+                echo "Target Debian VM: $VM_IP"
+
+                python3 - <<'PY' | ssh \
+                  -o BatchMode=yes \
+                  -o StrictHostKeyChecking=yes \
+                  bardfox@192.168.1.113 '
+                    set -eu
+                    umask 077
+
+                    varsfile=$(mktemp)
+                    trap "rm -f \"$varsfile\"" EXIT
+
+                    cat > "$varsfile"
+
+                    ansible-playbook \
+                      -i "provisioned-debian," \
+                      /home/bardfox/ansible-provisioning/debian-ready.yml \
+                      -e "@$varsfile"
+                  '
+                import json
+                import os
+
+                print(json.dumps({
+                    "ansible_host": os.environ["VM_IP"],
+                    "ansible_user": "bardfox",
+                    "ansible_connection": "ssh",
+                    "ansible_ssh_private_key_file": "/home/bardfox/.ssh/id_ed25519",
+                    "ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o BatchMode=yes"
+                }))
+                PY
+
+                echo "Debian 13 Ansible readiness completed successfully."
+
+            env:
+              VM_IP: $(PROVISIONED_VM_IP)
+
 
           # ----------------------------------------------------
           # Write successful provisioning details back to Jira

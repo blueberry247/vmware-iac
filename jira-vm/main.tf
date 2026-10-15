@@ -117,6 +117,7 @@ module "vm" {
   vm_memory              = var.vm_memory
   vm_os                  = var.vm_os
   windows_admin_password = var.windows_admin_password
+  ansible_ssh_public_key = var.ansible_ssh_public_key
 
   # Existing vSphere infrastructure
   resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
