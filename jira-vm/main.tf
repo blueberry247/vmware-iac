@@ -59,7 +59,7 @@ data "vsphere_network" "network" {
 }
 
 data "vsphere_virtual_machine" "template" {
-  name          = "Deb-01-template-v3"
+  name          = "DEBIAN13-CLOUDINIT-TEMPLATE-V2"
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
