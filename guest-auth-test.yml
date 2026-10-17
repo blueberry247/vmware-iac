@@ -1,0 +1,78 @@
+# ====================================================
+# VMware Debian Guest Authentication Test
+# ====================================================
+
+trigger: none
+pr: none
+
+pool:
+  name: VMware-Lab
+
+variables:
+- group: VMware-Terraform-Secrets
+
+steps:
+
+- checkout: none
+
+- task: Bash@3
+  displayName: 'Test Debian Guest Authentication'
+
+  inputs:
+    targetType: 'inline'
+
+    script: |
+      set -euo pipefail
+      umask 077
+
+      echo "===================================="
+      echo "VMWARE GUEST AUTHENTICATION TEST"
+      echo "===================================="
+
+      : "${GOVC_URL:?Missing vCenter server}"
+      : "${GOVC_USERNAME:?Missing vCenter username}"
+      : "${GOVC_PASSWORD:?Missing vCenter password}"
+      : "${GOVC_GUEST_LOGIN:?Missing Debian guest credentials}"
+
+      unset GOVC_INSECURE
+
+      GOVC=/home/bardfox/tools/govc/govc
+
+      # Check the guest credential format without displaying secrets.
+      if [[ "$GOVC_GUEST_LOGIN" != ansible:* ]]; then
+        echo "ERROR: Guest username or credential format is incorrect."
+        exit 1
+      fi
+
+      if [[ -z "${GOVC_GUEST_LOGIN#*:}" ]]; then
+        echo "ERROR: Guest password is empty."
+        exit 1
+      fi
+
+      echo "Guest credential format: OK"
+      echo "Testing VM: TF-VM-013"
+
+      HOST_KEY_FILE=$(mktemp)
+      trap 'rm -f "$HOST_KEY_FILE"' EXIT
+
+      if "$GOVC" guest.download \
+        -f \
+        -vm=TF-VM-013 \
+        /etc/ssh/ssh_host_ed25519_key.pub \
+        "$HOST_KEY_FILE"; then
+
+        echo "SUCCESS: VMware Guest Authentication Working"
+        ssh-keygen -lf "$HOST_KEY_FILE"
+
+      else
+
+        echo "FAILED: VMware Guest Authentication"
+        exit 1
+
+      fi
+
+  env:
+    GOVC_URL: $(VSPHERE_SERVER)
+    GOVC_USERNAME: $(VSPHERE_USER)
+    GOVC_PASSWORD: $(VSPHERE_PASSWORD)
+    GOVC_GUEST_LOGIN: $(DEBIAN_GUEST_LOGIN)
