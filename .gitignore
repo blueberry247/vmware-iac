@@ -30,3 +30,9 @@ tfplan.gpg
 terraform-state-backup.json
 terraform-plan-review.txt
 azure-pipelines-backup.yml
+
+# Terraform working directory
+.terraform/
+
+# Terraform state files
+*.tfstate
