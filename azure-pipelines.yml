@@ -379,367 +379,433 @@ stages:
               TF_VAR_vm_network: ${{ parameters.vm_network }}
 
 
-          # ====================================================
-          # ANSIBLE - WINDOWS SERVER 2022 READINESS
-          # ====================================================
+# ============================================================
+# STAGE 3 - POST-DEPLOYMENT / RESUME EXISTING VM
+# ============================================================
+
+- stage: PostDeploy
+  displayName: 'VM Configuration and Jira Update'
+  dependsOn:
+  - Plan
+  - Apply
+
+  # On no changes, Apply is deliberately skipped. On changes, it must succeed.
+  # Never run post-deployment if Plan fails or an Apply was required but failed.
+  condition: |
+    and(
+      eq(dependencies.Plan.result, 'Succeeded'),
+      ne('${{ parameters.vm_name }}', ''),
+      or(
+        and(
+          eq(dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'], 'false'),
+          eq(dependencies.Apply.result, 'Skipped')
+        ),
+        and(
+          eq(dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'], 'true'),
+          eq(dependencies.Apply.result, 'Succeeded')
+        )
+      )
+    )
+
+  jobs:
+  - job: ConfigureVM
+    displayName: 'Verify VM, configure with Ansible, update Jira'
+    steps:
+    - checkout: self
+
+    # Apply-job variables do not carry into a new stage. Read the authoritative
+    # VM IP output from the same per-VM Azure Blob Terraform state used by Plan.
+    - task: AzureCLI@2
+      displayName: 'Read VM IP from Terraform state'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -euo pipefail
+          export ARM_USE_AZUREAD=true
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+
+          : "${TF_VAR_vm_name:?Missing VM name}"
+          cd "$(terraformDirectory)"
+          terraform init \
+            -reconfigure \
+            -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
+
+          VM_IP=$(terraform output -raw vm_ip_address)
+          # Fail closed on missing or malformed IPv4 addresses.
+          python3 - "$VM_IP" <<'PYIP'
+          import ipaddress, sys
+          try:
+              value = ipaddress.ip_address(sys.argv[1])
+              assert isinstance(value, ipaddress.IPv4Address)
+              assert not value.is_unspecified and not value.is_multicast
+          except (ValueError, AssertionError):
+              sys.exit('ERROR: VM state does not contain a valid IPv4 address')
+          PYIP
+          echo "VM IP Address: $VM_IP"
+          echo "##vso[task.setvariable variable=PROVISIONED_VM_IP]$VM_IP"
+      env:
+        TF_VAR_vm_name: ${{ parameters.vm_name }}
+
+    # ====================================================
+    # ANSIBLE - WINDOWS SERVER 2022 READINESS
+    # ====================================================
+
+    - task: Bash@3
+      displayName: 'Ansible - Configure Windows Server 2022'
+
+      condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Windows Server 2022'))
+
+      inputs:
+        targetType: 'inline'
+
+        script: |
+          set -euo pipefail
+
+          echo "===================================="
+          echo "ANSIBLE WINDOWS CONFIGURATION"
+          echo "===================================="
+
+          : "${VM_IP:?Missing VM IP address}"
+          : "${WINDOWS_ADMIN_PASSWORD:?Missing Windows Administrator password}"
+
+          echo "Target VM IP: $VM_IP"
+          echo "Connecting to ANSIBLE-01..."
+
+          # Send Ansible connection settings securely over SSH.
+          # Password is not included in command-line arguments.
+
+          python3 - <<'PY' | ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            bardfox@192.168.1.113 '
+              set -eu
+              umask 077
+
+              varsfile=$(mktemp)
+
+              trap "rm -f \"$varsfile\"" EXIT
+
+              cat > "$varsfile"
+
+              ansible-playbook \
+                -i "provisioned-windows," \
+                /home/bardfox/ansible-provisioning/windows-ready.yml \
+                -e "@$varsfile"
+            '
+          import json
+          import os
+
+          print(json.dumps({
+              "ansible_host": os.environ["VM_IP"],
+              "ansible_connection": "winrm",
+              "ansible_user": "Administrator",
+              "ansible_port": 5985,
+              "ansible_winrm_transport": "ntlm",
+              "ansible_winrm_message_encryption": "always",
+              "ansible_password": os.environ["WINDOWS_ADMIN_PASSWORD"]
+          }))
+          PY
+
+          echo "===================================="
+          echo "ANSIBLE WINDOWS CHECK COMPLETED"
+          echo "===================================="
+
+      env:
+        VM_IP: $(PROVISIONED_VM_IP)
+        WINDOWS_ADMIN_PASSWORD: $(WINDOWS_ADMIN_PASSWORD)
+
+
+    # ====================================================
+    # ANSIBLE - DEBIAN 13 READINESS
+    # ====================================================
+    # ====================================================
+    # DEBIAN 13 - AUTOMATIC SSH HOST KEY REGISTRATION
+    # ====================================================
+
+    - task: Bash@3
+      displayName: 'VMware - Register Debian SSH host key'
+
+      condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Debian 13'))
+
+      inputs:
+        targetType: 'inline'
+
+        script: |
+          set -euo pipefail
+          umask 077
+
+          echo "===================================="
+          echo "DEBIAN SSH HOST KEY REGISTRATION"
+          echo "===================================="
 
-          - task: Bash@3
-            displayName: 'Ansible - Configure Windows Server 2022'
+          : "${VM_NAME:?Missing VM name}"
+          : "${VM_IP:?Missing VM IP}"
+          : "${GOVC_URL:?Missing vCenter server}"
+          : "${GOVC_USERNAME:?Missing vCenter username}"
+          : "${GOVC_PASSWORD:?Missing vCenter password}"
+          : "${GOVC_GUEST_LOGIN:?Missing Debian guest credentials}"
+
+          # Ensure vCenter certificate verification stays enabled.
+          unset GOVC_INSECURE
+
+          # Prevent unsafe values being used in remote commands.
+          [[ "$VM_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ "$BUILD_ID" =~ ^[0-9]+$ ]] || exit 1
+
+          GOVC=/home/bardfox/tools/govc/govc
+
+          HOST_KEY_FILE=$(mktemp)
+          trap 'rm -f "$HOST_KEY_FILE"' EXIT
+
+          echo "Retrieving SSH host key for $VM_NAME"
+
+          # Download the public host key through VMware Guest Operations.
+          # Retry while the newly provisioned VM finishes starting.
+          downloaded=false
+
+          for attempt in $(seq 1 12); do
+            if "$GOVC" guest.download \
+              -f \
+              -vm="$VM_NAME" \
+              /etc/ssh/ssh_host_ed25519_key.pub \
+              "$HOST_KEY_FILE"; then
+              downloaded=true
+              break
+            fi
 
-            condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Windows Server 2022'))
+            echo "Waiting for VMware Guest Operations ($attempt/12)"
+            rm -f "$HOST_KEY_FILE"
+            sleep 10
+          done
 
-            inputs:
-              targetType: 'inline'
+          if [[ "$downloaded" != true ]]; then
+            echo "ERROR: Could not retrieve Debian SSH host key."
+            exit 1
+          fi
 
-              script: |
-                set -euo pipefail
+          # Verify that the downloaded file contains an ED25519 public key.
+          ssh-keygen -lf "$HOST_KEY_FILE"
+          grep -q '^ssh-ed25519 ' "$HOST_KEY_FILE"
+
+          echo "Transferring verified SSH key to ANSIBLE-01"
+
+          REMOTE_FILE="/home/bardfox/debian-host-key-${BUILD_ID}.pub"
+
+          scp \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$HOST_KEY_FILE" \
+            "bardfox@192.168.1.113:$REMOTE_FILE"
+
+          echo "Registering SSH host key on ANSIBLE-01"
+
+          ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            bardfox@192.168.1.113 \
+            "bash -s -- '$VM_IP' '$BUILD_ID'" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+
+          VM_IP="$1"
+          BUILD_ID="$2"
 
-                echo "===================================="
-                echo "ANSIBLE WINDOWS CONFIGURATION"
-                echo "===================================="
+          KEY_FILE="$HOME/debian-host-key-${BUILD_ID}.pub"
+          trap 'rm -f "$KEY_FILE"' EXIT
 
-                : "${VM_IP:?Missing VM IP address}"
-                : "${WINDOWS_ADMIN_PASSWORD:?Missing Windows Administrator password}"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          touch "$HOME/.ssh/known_hosts"
 
-                echo "Target VM IP: $VM_IP"
-                echo "Connecting to ANSIBLE-01..."
+          # Prevent concurrent pipeline runs changing known_hosts together.
+          (
+            flock -x 9
 
-                # Send Ansible connection settings securely over SSH.
-                # Password is not included in command-line arguments.
+            ssh-keygen -R "$VM_IP" \
+              -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1 || true
 
-                python3 - <<'PY' | ssh \
-                  -o BatchMode=yes \
-                  -o StrictHostKeyChecking=yes \
-                  bardfox@192.168.1.113 '
-                    set -eu
-                    umask 077
-
-                    varsfile=$(mktemp)
-
-                    trap "rm -f \"$varsfile\"" EXIT
-
-                    cat > "$varsfile"
-
-                    ansible-playbook \
-                      -i "provisioned-windows," \
-                      /home/bardfox/ansible-provisioning/windows-ready.yml \
-                      -e "@$varsfile"
-                  '
-                import json
-                import os
+            awk -v ip="$VM_IP" '
+              $1 == "ssh-ed25519" {
+                print ip, $1, $2
+              }
+            ' "$KEY_FILE" >> "$HOME/.ssh/known_hosts"
 
-                print(json.dumps({
-                    "ansible_host": os.environ["VM_IP"],
-                    "ansible_connection": "winrm",
-                    "ansible_user": "Administrator",
-                    "ansible_port": 5985,
-                    "ansible_winrm_transport": "ntlm",
-                    "ansible_winrm_message_encryption": "always",
-                    "ansible_password": os.environ["WINDOWS_ADMIN_PASSWORD"]
-                }))
-                PY
-
-                echo "===================================="
-                echo "ANSIBLE WINDOWS CHECK COMPLETED"
-                echo "===================================="
-
-            env:
-              VM_IP: $(PROVISIONED_VM_IP)
-              WINDOWS_ADMIN_PASSWORD: $(WINDOWS_ADMIN_PASSWORD)
+            chmod 600 "$HOME/.ssh/known_hosts"
 
+          ) 9>"$HOME/.ssh/known_hosts.lock"
 
-          # ====================================================
-          # ANSIBLE - DEBIAN 13 READINESS
-          # ====================================================
-          # ====================================================
-          # DEBIAN 13 - AUTOMATIC SSH HOST KEY REGISTRATION
-          # ====================================================
+          echo "Debian SSH host key registered successfully."
+          REMOTE
 
-          - task: Bash@3
-            displayName: 'VMware - Register Debian SSH host key'
+          echo "===================================="
+          echo "SSH HOST KEY REGISTRATION COMPLETED"
+          echo "===================================="
 
-            condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Debian 13'))
+      env:
+        VM_NAME: ${{ parameters.vm_name }}
+        VM_IP: $(PROVISIONED_VM_IP)
+        BUILD_ID: $(Build.BuildId)
+        GOVC_URL: $(VSPHERE_SERVER)
+        GOVC_USERNAME: $(VSPHERE_USER)
+        GOVC_PASSWORD: $(VSPHERE_PASSWORD)
+        GOVC_GUEST_LOGIN: $(DEBIAN_GUEST_LOGIN)
 
-            inputs:
-              targetType: 'inline'
-
-              script: |
-                set -euo pipefail
-                umask 077
+    - task: Bash@3
+      displayName: 'Ansible - Verify Debian 13 readiness'
 
-                echo "===================================="
-                echo "DEBIAN SSH HOST KEY REGISTRATION"
-                echo "===================================="
+      condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Debian 13'))
 
-                : "${VM_NAME:?Missing VM name}"
-                : "${VM_IP:?Missing VM IP}"
-                : "${GOVC_URL:?Missing vCenter server}"
-                : "${GOVC_USERNAME:?Missing vCenter username}"
-                : "${GOVC_PASSWORD:?Missing vCenter password}"
-                : "${GOVC_GUEST_LOGIN:?Missing Debian guest credentials}"
+      inputs:
+        targetType: 'inline'
 
-                # Ensure vCenter certificate verification stays enabled.
-                unset GOVC_INSECURE
-
-                # Prevent unsafe values being used in remote commands.
-                [[ "$VM_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-                [[ "$BUILD_ID" =~ ^[0-9]+$ ]] || exit 1
-
-                GOVC=/home/bardfox/tools/govc/govc
+        script: |
+          set -euo pipefail
 
-                HOST_KEY_FILE=$(mktemp)
-                trap 'rm -f "$HOST_KEY_FILE"' EXIT
+          echo "===================================="
+          echo "ANSIBLE DEBIAN 13 READINESS"
+          echo "===================================="
 
-                echo "Retrieving SSH host key for $VM_NAME"
+          : "${VM_IP:?Missing VM IP address}"
 
-                # Download the public host key through VMware Guest Operations.
-                # Retry while the newly provisioned VM finishes starting.
-                downloaded=false
+          echo "Target Debian VM: $VM_IP"
 
-                for attempt in $(seq 1 12); do
-                  if "$GOVC" guest.download \
-                    -f \
-                    -vm="$VM_NAME" \
-                    /etc/ssh/ssh_host_ed25519_key.pub \
-                    "$HOST_KEY_FILE"; then
-                    downloaded=true
-                    break
-                  fi
+          python3 - <<'PY' | ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            bardfox@192.168.1.113 '
+              set -eu
+              umask 077
 
-                  echo "Waiting for VMware Guest Operations ($attempt/12)"
-                  rm -f "$HOST_KEY_FILE"
-                  sleep 10
-                done
+              varsfile=$(mktemp)
+              trap "rm -f \"$varsfile\"" EXIT
 
-                if [[ "$downloaded" != true ]]; then
-                  echo "ERROR: Could not retrieve Debian SSH host key."
-                  exit 1
-                fi
+              cat > "$varsfile"
 
-                # Verify that the downloaded file contains an ED25519 public key.
-                ssh-keygen -lf "$HOST_KEY_FILE"
-                grep -q '^ssh-ed25519 ' "$HOST_KEY_FILE"
+              ansible-playbook \
+                -i "provisioned-debian," \
+                /home/bardfox/ansible-provisioning/debian-ready.yml \
+                -e "@$varsfile"
+            '
+          import json
+          import os
 
-                echo "Transferring verified SSH key to ANSIBLE-01"
+          print(json.dumps({
+              "ansible_host": os.environ["VM_IP"],
+              "ansible_user": "bardfox",
+              "ansible_connection": "ssh",
+              "ansible_ssh_private_key_file": "/home/bardfox/.ssh/id_ed25519",
+              "ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o BatchMode=yes"
+          }))
+          PY
 
-                REMOTE_FILE="/home/bardfox/debian-host-key-${BUILD_ID}.pub"
+          echo "Debian 13 Ansible readiness completed successfully."
 
-                scp \
-                  -o BatchMode=yes \
-                  -o StrictHostKeyChecking=yes \
-                  "$HOST_KEY_FILE" \
-                  "bardfox@192.168.1.113:$REMOTE_FILE"
-
-                echo "Registering SSH host key on ANSIBLE-01"
+      env:
+        VM_IP: $(PROVISIONED_VM_IP)
 
-                ssh \
-                  -o BatchMode=yes \
-                  -o StrictHostKeyChecking=yes \
-                  bardfox@192.168.1.113 \
-                  "bash -s -- '$VM_IP' '$BUILD_ID'" <<'REMOTE'
-                set -euo pipefail
-                umask 077
 
-                VM_IP="$1"
-                BUILD_ID="$2"
+    # ----------------------------------------------------
+    # Write successful provisioning details back to Jira
+    # ----------------------------------------------------
 
-                KEY_FILE="$HOME/debian-host-key-${BUILD_ID}.pub"
-                trap 'rm -f "$KEY_FILE"' EXIT
+    - task: Bash@3
+      displayName: 'Update Jira with VM details'
 
-                mkdir -p "$HOME/.ssh"
-                chmod 700 "$HOME/.ssh"
-                touch "$HOME/.ssh/known_hosts"
+      condition: succeeded()
 
-                # Prevent concurrent pipeline runs changing known_hosts together.
-                (
-                  flock -x 9
+      inputs:
+        targetType: 'inline'
 
-                  ssh-keygen -R "$VM_IP" \
-                    -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1 || true
+        script: |
+          set -e
 
-                  awk -v ip="$VM_IP" '
-                    $1 == "ssh-ed25519" {
-                      print ip, $1, $2
-                    }
-                  ' "$KEY_FILE" >> "$HOME/.ssh/known_hosts"
 
-                  chmod 600 "$HOME/.ssh/known_hosts"
+          VM_NAME="$VM_NAME_PARAMETER"
+          VM_IP="$PROVISIONED_VM_IP"
 
-                ) 9>"$HOME/.ssh/known_hosts.lock"
+          echo "Updating Jira issue: $JIRA_ISSUE_KEY"
+          echo "VM Name: $VM_NAME"
+          echo "VM IP: $VM_IP"
 
-                echo "Debian SSH host key registered successfully."
-                REMOTE
-
-                echo "===================================="
-                echo "SSH HOST KEY REGISTRATION COMPLETED"
-                echo "===================================="
-
-            env:
-              VM_NAME: ${{ parameters.vm_name }}
-              VM_IP: $(PROVISIONED_VM_IP)
-              BUILD_ID: $(Build.BuildId)
-              GOVC_URL: $(VSPHERE_SERVER)
-              GOVC_USERNAME: $(VSPHERE_USER)
-              GOVC_PASSWORD: $(VSPHERE_PASSWORD)
-              GOVC_GUEST_LOGIN: $(DEBIAN_GUEST_LOGIN)
-
-          - task: Bash@3
-            displayName: 'Ansible - Verify Debian 13 readiness'
-
-            condition: and(succeeded(), eq('${{ parameters.vm_os }}', 'Debian 13'))
-
-            inputs:
-              targetType: 'inline'
-
-              script: |
-                set -euo pipefail
-
-                echo "===================================="
-                echo "ANSIBLE DEBIAN 13 READINESS"
-                echo "===================================="
-
-                : "${VM_IP:?Missing VM IP address}"
-
-                echo "Target Debian VM: $VM_IP"
-
-                python3 - <<'PY' | ssh \
-                  -o BatchMode=yes \
-                  -o StrictHostKeyChecking=yes \
-                  bardfox@192.168.1.113 '
-                    set -eu
-                    umask 077
-
-                    varsfile=$(mktemp)
-                    trap "rm -f \"$varsfile\"" EXIT
-
-                    cat > "$varsfile"
-
-                    ansible-playbook \
-                      -i "provisioned-debian," \
-                      /home/bardfox/ansible-provisioning/debian-ready.yml \
-                      -e "@$varsfile"
-                  '
-                import json
-                import os
-
-                print(json.dumps({
-                    "ansible_host": os.environ["VM_IP"],
-                    "ansible_user": "bardfox",
-                    "ansible_connection": "ssh",
-                    "ansible_ssh_private_key_file": "/home/bardfox/.ssh/id_ed25519",
-                    "ansible_ssh_common_args": "-o StrictHostKeyChecking=yes -o BatchMode=yes"
-                }))
-                PY
-
-                echo "Debian 13 Ansible readiness completed successfully."
-
-            env:
-              VM_IP: $(PROVISIONED_VM_IP)
-
-
-          # ----------------------------------------------------
-          # Write successful provisioning details back to Jira
-          # ----------------------------------------------------
-
-          - task: Bash@3
-            displayName: 'Update Jira with VM details'
-
-            condition: succeeded()
-
-            inputs:
-              targetType: 'inline'
-
-              script: |
-                set -e
-
-
-                VM_NAME="$VM_NAME_PARAMETER"
-                VM_IP="$PROVISIONED_VM_IP"
-
-                echo "Updating Jira issue: $JIRA_ISSUE_KEY"
-                echo "VM Name: $VM_NAME"
-                echo "VM IP: $VM_IP"
-
-                JIRA_COMMENT=$(cat <<EOF
+          JIRA_COMMENT=$(cat <<EOF
+          {
+            "body": {
+              "type": "doc",
+              "version": 1,
+              "content": [
                 {
-                  "body": {
-                    "type": "doc",
-                    "version": 1,
-                    "content": [
-                      {
-                        "type": "paragraph",
-                        "content": [
-                          {
-                            "type": "text",
-                            "text": "VM provisioning completed successfully."
-                          }
-                        ]
-                      },
-                      {
-                        "type": "paragraph",
-                        "content": [
-                          {
-                            "type": "text",
-                            "text": "VM Name: $VM_NAME"
-                          }
-                        ]
-                      },
-                      {
-                        "type": "paragraph",
-                        "content": [
-                          {
-                            "type": "text",
-                            "text": "Hostname: $VM_HOSTNAME"
-                          }
-                        ]
-                      },
-                      {
-                        "type": "paragraph",
-                        "content": [
-                          {
-                            "type": "text",
-                            "text": "IP Address: $VM_IP"
-                          }
-                        ]
-                      },
-                      {
-                        "type": "paragraph",
-                        "content": [
-                          {
-                            "type": "text",
-                            "text": "Provisioned automatically by Azure DevOps / Terraform."
-                          }
-                        ]
-                      }
-                    ]
-                  }
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "VM provisioning completed successfully."
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "VM Name: $VM_NAME"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Hostname: $VM_HOSTNAME"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "IP Address: $VM_IP"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Provisioned automatically by Azure DevOps / Terraform."
+                    }
+                  ]
                 }
-                EOF
-                )
+              ]
+            }
+          }
+          EOF
+          )
 
-                curl --fail-with-body \
-                  --request POST \
-                  --url "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY/comment" \
-                  --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-                  --header "Accept: application/json" \
-                  --header "Content-Type: application/json" \
-                  --data "$JIRA_COMMENT"
+          curl --fail-with-body \
+            --request POST \
+            --url "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY/comment" \
+            --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data "$JIRA_COMMENT"
 
-                echo ""
-                echo "Jira issue $JIRA_ISSUE_KEY updated successfully."
+          echo ""
+          echo "Jira issue $JIRA_ISSUE_KEY updated successfully."
 
-            env:
-              JIRA_BASE_URL: $(JIRA_BASE_URL)
-              JIRA_EMAIL: $(JIRA_EMAIL)
-              JIRA_API_TOKEN: $(JIRA_API_TOKEN)
-              JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
-              VM_HOSTNAME: ${{ parameters.vm_hostname }}
-              VM_NAME_PARAMETER: ${{ parameters.vm_name }}
-              PROVISIONED_VM_IP: $(PROVISIONED_VM_IP)
-
-
-
-
-
-
-
+      env:
+        JIRA_BASE_URL: $(JIRA_BASE_URL)
+        JIRA_EMAIL: $(JIRA_EMAIL)
+        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+        JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+        VM_HOSTNAME: ${{ parameters.vm_hostname }}
+        VM_NAME_PARAMETER: ${{ parameters.vm_name }}
+        PROVISIONED_VM_IP: $(PROVISIONED_VM_IP)
