@@ -22,18 +22,3 @@ output "template_id" {
   description = "Golden template UUID"
   value       = data.vsphere_virtual_machine.template.id
 }
-
-output "vm_name" {
-  description = "Name of the Terraform-created VM"
-  value       = vsphere_virtual_machine.vm.name
-}
-
-output "vm_uuid" {
-  description = "UUID of the Terraform-created VM"
-  value       = vsphere_virtual_machine.vm.uuid
-}
-
-output "vm_ip_address" {
-  description = "IP address reported by VMware Tools"
-  value       = vsphere_virtual_machine.vm.default_ip_address
-}
