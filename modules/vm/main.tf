@@ -427,7 +427,7 @@ resource "vsphere_virtual_machine" "vm" {
     var.ansible_ssh_public_key != null ? {
 
       "guestinfo.userdata" = base64encode(
-        "#cloud-config\n" + yamlencode({
+        format("#cloud-config\n%s", yamlencode({
           users = [
             "default",
             {
@@ -435,7 +435,7 @@ resource "vsphere_virtual_machine" "vm" {
               ssh_authorized_keys = [var.ansible_ssh_public_key]
             }
           ]
-        })
+        }))
       )
 
       "guestinfo.userdata.encoding" = "base64"
