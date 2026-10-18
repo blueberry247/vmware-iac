@@ -244,6 +244,9 @@ stages:
           # JSON plans can contain sensitive information. Never print them.
           terraform show -json datastore-refresh.tfplan > datastore-refresh.json
 
+          # Read the refreshed datastore from Terraform's refresh-only plan.
+          # Resource drift is authoritative when VMware differs from saved state.
+          # The plan may omit the VM from planned_values in refresh-only mode.
           TF_VAR_vm_datastore_id="$(python3 - <<'PY'
           import json
           import os
@@ -251,33 +254,61 @@ stages:
           import sys
 
           TARGET = "module.vm.vsphere_virtual_machine.vm"
-          vm_name = os.environ["TF_VAR_vm_name"]
+          expected_name = os.environ["TF_VAR_vm_name"]
 
-          with open("datastore-refresh.json", encoding="utf-8") as f:
-              document = json.load(f)
+          def fail(message):
+              sys.exit(f"ERROR: {message}")
 
-          # Terraform stores resources within nested modules, not necessarily
-          # in planned_values.root_module.resources.
-          def walk(module):
-              for resource in module.get("resources", []):
-                  yield resource
-              for child in module.get("child_modules", []):
-                  yield from walk(child)
+          def find_resources(state_values):
+              """Find the exact VM in root/child modules of a state-values object."""
+              def walk(module):
+                  for item in module.get("resources", []):
+                      yield item
+                  for child in module.get("child_modules", []):
+                      yield from walk(child)
 
-          root = (document.get("planned_values") or {}).get("root_module") or {}
-          matches = [r for r in walk(root)
-                     if r.get("address") == TARGET and r.get("mode") == "managed"]
-          if len(matches) != 1:
-              sys.exit("ERROR: Cannot uniquely identify the VM in refreshed vSphere state.")
+              root = (state_values or {}).get("root_module") or {}
+              return [r for r in walk(root)
+                      if r.get("address") == TARGET and r.get("mode") == "managed"]
 
-          values = matches[0].get("values") or {}
-          if values.get("name") != vm_name or not values.get("id"):
-              sys.exit("ERROR: Refreshed vSphere VM identity does not match Jira request.")
+          with open("datastore-refresh.json", encoding="utf-8") as handle:
+              document = json.load(handle)
+
+          drift = [r for r in document.get("resource_drift", [])
+                   if r.get("address") == TARGET and r.get("mode") == "managed"]
+          if len(drift) > 1:
+              fail("Multiple drift records found for the requested VM")
+
+          if drift:
+              change = drift[0].get("change") or {}
+              if change.get("actions") not in (["update"], ["no-op"]):
+                  fail("VM was deleted or replaced outside Terraform")
+              values = change.get("after") or {}
+              previous = change.get("before") or {}
+              if previous.get("id") and previous.get("id") != values.get("id"):
+                  fail("VM identity changed during refresh")
+              source = "vSphere refresh (resource_drift)"
+          else:
+              matches = find_resources(document.get("planned_values"))
+              source = "refresh-only planned_values"
+              if not matches:
+                  # If no drift was detected for this VM, the saved prior-state
+                  # datastore is still current. Do not use it if VM drift exists.
+                  prior_values = (document.get("prior_state") or {}).get("values")
+                  matches = find_resources(prior_values)
+                  source = "prior_state (no VM drift)"
+              if len(matches) != 1:
+                  fail("Cannot uniquely identify the VM in the refreshed Terraform plan")
+              values = matches[0].get("values") or {}
+
+          if values.get("name") != expected_name or not values.get("id"):
+              fail("Refreshed VM identity does not match Jira request")
 
           datastore = values.get("datastore_id")
           if not isinstance(datastore, str) or not re.fullmatch(r"datastore-[0-9]+", datastore):
-              sys.exit("ERROR: VMware did not return a valid VM datastore ID.")
+              fail("Refresh did not return a valid datastore ID")
 
+          print(f"Datastore source: {source}", file=sys.stderr)
           print(datastore)
           PY
           )"
