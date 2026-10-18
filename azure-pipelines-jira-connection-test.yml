@@ -1,0 +1,81 @@
+# Jira Cloud connection test only. Does not run Terraform or modify Jira.
+trigger: none
+pr: none
+
+parameters:
+- name: jira_issue_key
+  displayName: 'Jira Issue Key to check (read-only)'
+  type: string
+  default: 'IT-30'
+
+pool:
+  name: VMware-Lab
+
+variables:
+- group: VMware-Terraform-Secrets
+
+steps:
+- bash: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import base64
+    import json
+    import os
+    import re
+    import sys
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import quote, urlsplit
+    from urllib.request import Request, urlopen
+
+    base = os.environ['JIRA_BASE_URL'].strip().rstrip('/')
+    email = os.environ['JIRA_EMAIL'].strip()
+    token = os.environ['JIRA_API_TOKEN']
+    issue = os.environ['JIRA_ISSUE_KEY'].strip().upper()
+
+    parsed = urlsplit(base)
+    if parsed.scheme != 'https' or not parsed.netloc or parsed.path not in ('', '/'):
+        sys.exit('FAIL: JIRA_BASE_URL must be the https Jira site URL, without a path.')
+    if not email or not token:
+        sys.exit('FAIL: Jira email or API token is missing.')
+    if not re.fullmatch(r'[A-Z][A-Z0-9_]*-[0-9]+', issue):
+        sys.exit('FAIL: Invalid Jira issue key.')
+
+    auth = base64.b64encode(f'{email}:{token}'.encode('utf-8')).decode('ascii')
+    headers = {'Authorization': f'Basic {auth}', 'Accept': 'application/json'}
+
+    def get(path):
+        try:
+            req = Request(base + path, headers=headers, method='GET')
+            with urlopen(req, timeout=25) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            sys.exit(f'FAIL: Jira returned HTTP {exc.code}. Verify token and account permissions.')
+        except (URLError, TimeoutError) as exc:
+            sys.exit(f'FAIL: Jira connection error ({type(exc).__name__}).')
+
+    account = get('/rest/api/3/myself')
+    print(f'PASS: Jira authentication succeeded (account: {account.get("displayName", "unknown")}).')
+
+    issue_path = '/rest/api/3/issue/' + quote(issue, safe='')
+    details = get(issue_path + '?fields=status')
+    status = (details.get('fields', {}).get('status') or {}).get('name', '<unknown>')
+    print(f'PASS: Jira issue {issue} is readable (current status: {status}).')
+
+    transitions = get(issue_path + '/transitions').get('transitions', [])
+    destinations = [(t.get('to') or {}).get('name', '<unknown>') for t in transitions]
+    print('Available next workflow statuses: ' + (', '.join(destinations) if destinations else 'none'))
+    done = [t for t in transitions if (t.get('to') or {}).get('name', '').casefold() == 'done']
+    if status.casefold() == 'done':
+        print('NOTE: Ticket is already Done. No changes were made.')
+    elif len(done) == 1:
+        print('PASS: One direct transition to Done is available to this account.')
+    else:
+        print('ATTENTION: Direct Done transition is not uniquely available. The resize callback may need a workflow adjustment.')
+    print('READ-ONLY TEST COMPLETE: No Jira ticket or VMware resources were modified.')
+    PY
+  displayName: 'Read-only Jira API connection test'
+  env:
+    JIRA_BASE_URL: $(JIRA_BASE_URL)
+    JIRA_EMAIL: $(JIRA_EMAIL)
+    JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+    JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
