@@ -99,7 +99,7 @@ stages:
 
         inlineScript: |
 
-          set -e
+          set -euo pipefail
 
           # ----------------------------------------------------
           # Azure authentication for Terraform backend
@@ -110,6 +110,23 @@ stages:
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_OIDC_TOKEN="$idToken"
+
+          # Validate Jira parameters before constructing a Terraform state key.
+          # Block slashes, dots and other characters that could select a different state.
+          if [[ ! "$TF_VAR_vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
+            echo "ERROR: Invalid VM name supplied by Jira."
+            exit 1
+          fi
+
+          if [[ ! "$TF_VAR_vm_cpu" =~ ^[0-9]+$ ]] ||
+             [[ ! "$TF_VAR_vm_memory" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: CPU and memory must be positive whole numbers."
+            exit 1
+          fi
+          if (( TF_VAR_vm_cpu < 1 || TF_VAR_vm_memory < 1 )); then
+            echo "ERROR: CPU and memory must be greater than zero."
+            exit 1
+          fi
 
           # All Terraform commands below run from the VM Terraform root.
           cd "$(terraformDirectory)"
@@ -130,12 +147,36 @@ stages:
           # ----------------------------------------------------
 
           terraform init \
+            -input=false \
             -reconfigure \
             -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
-          echo ""
-          echo "Terraform state:"
-          terraform state list
+          # Retrieve existing VM settings from Terraform state
+          TF_VAR_vm_hostname="$(terraform output -raw vm_hostname)"
+          TF_VAR_vm_network="$(terraform output -raw vm_network)"
+          TF_VAR_vm_os="$(terraform output -raw vm_os)"
+
+          # Stop if any existing VM setting is missing
+          if [ -z "$TF_VAR_vm_hostname" ] || \
+            [ -z "$TF_VAR_vm_network" ] || \
+            [ -z "$TF_VAR_vm_os" ]; then
+            echo "ERROR: Existing VM hostname, network or OS is missing."
+            exit 1
+          fi
+
+          # Only allow supported operating systems
+          if [ "$TF_VAR_vm_os" != "Debian 13" ] && \
+            [ "$TF_VAR_vm_os" != "Windows Server 2022" ]; then
+            echo "ERROR: Unsupported VM operating system."
+            exit 1
+          fi
+
+          export TF_VAR_vm_hostname
+          export TF_VAR_vm_network
+          export TF_VAR_vm_os
+
+          echo "Existing VM hostname: $TF_VAR_vm_hostname"
+          echo "Existing VM network:  $TF_VAR_vm_network"
 
           # ----------------------------------------------------
           # SAFETY CHECK 1
@@ -144,7 +185,7 @@ stages:
 
           VM_RESOURCE="module.vm.vsphere_virtual_machine.vm"
 
-          if ! terraform state list | grep -qx "$VM_RESOURCE"; then
+          if ! terraform state list | grep -Fqx "$VM_RESOURCE"; then
             echo "ERROR: Module-based VM resource not found in Terraform state."
             echo "Resize cancelled."
             exit 1
@@ -193,16 +234,88 @@ stages:
           terraform plan \
             -input=false \
             -out=resize.tfplan
+          
+          # Convert Terraform plan to JSON for safety validation
+          terraform show -json resize.tfplan > resize-plan.json
 
-          echo ""
-          echo "===================================="
-          echo "RESIZE PLAN"
-          echo "===================================="
 
-          terraform show -no-color resize.tfplan
+          # ----------------------------------------------------
+          # SAFETY CHECK 3
+          # Allow CPU and memory changes ONLY.
+          # Reject VM replacement, deletion or other changes.
+          # ----------------------------------------------------
 
-          echo ""
-          echo "Resize plan created successfully."
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          def fail(message):
+              print(f"RESIZE BLOCKED: {message}")
+              sys.exit(1)
+
+          with open("resize-plan.json", encoding="utf-8") as f:
+              plan = json.load(f)
+
+          target = "module.vm.vsphere_virtual_machine.vm"
+          allowed = {"num_cpus", "memory"}
+          expected_name = os.environ["TF_VAR_vm_name"]
+          expected_cpu = int(os.environ["TF_VAR_vm_cpu"])
+          expected_memory = int(os.environ["TF_VAR_vm_memory"])
+          updates = 0
+
+          for resource in plan.get("resource_changes", []):
+              if resource.get("mode") != "managed":
+                  continue
+
+              address = resource.get("address", "<unknown>")
+              change = resource.get("change") or {}
+              actions = change.get("actions", [])
+              if actions == ["no-op"]:
+                  continue
+
+              if address != target:
+                  fail(f"Unexpected managed resource change: {address}")
+              if actions != ["update"]:
+                  fail(f"VM must be updated in place, not replaced or deleted: {actions}")
+
+              before = change.get("before") or {}
+              after = change.get("after") or {}
+              if before.get("name") != expected_name or after.get("name") != expected_name:
+                  fail("VM name does not match the Jira request")
+
+              changed = {key for key in set(before) | set(after)
+                         if before.get(key) != after.get(key)}
+              if not changed:
+                  fail("No actual VM setting changes found")
+              if changed - allowed:
+                  fail(f"Unexpected VM setting changes: {sorted(changed - allowed)}")
+
+              # Unknown computed settings could hide an additional planned change.
+              # Fail closed; inspect such plans rather than automatically apply them.
+              unknown = change.get("after_unknown") or {}
+              for key, value in unknown.items():
+                  if key not in allowed and value:
+                      fail(f"Non-resize attribute has an unknown planned value: {key}")
+
+              if after.get("num_cpus") != expected_cpu:
+                  fail("CPU does not match the Jira request")
+              if after.get("memory") != expected_memory:
+                  fail("Memory does not match the Jira request")
+              updates += 1
+
+          if updates != 1:
+              fail(f"Expected exactly one VM update, found {updates}")
+
+          print("SAFETY CHECK PASSED: only permitted CPU/memory changes.")
+          print(f"VM: {expected_name}")
+          print(f"CPU: {before.get('num_cpus')} -> {after.get('num_cpus')}")
+          print(f"Memory (MB): {before.get('memory')} -> {after.get('memory')}")
+          PY
+
+          
+          # Do not print the full Terraform plan here: it can contain secrets.
+          echo "Resize plan validated successfully; awaiting manual approval."
 
       env:
 
@@ -212,6 +325,9 @@ stages:
         TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
         TF_VAR_vsphere_server: $(VSPHERE_SERVER)
 
+        TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+        TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+
         # Existing VM that Jira requested to resize.
         TF_VAR_vm_name: ${{ parameters.vm_name }}
 
@@ -219,11 +335,7 @@ stages:
         TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
         TF_VAR_vm_memory: ${{ parameters.vm_memory }}
 
-        # Existing variables required by the Terraform root module.
-        # These are currently fixed test values and should be replaced by
-        # Jira fields or approved environment variables when generalized.
-        TF_VAR_vm_hostname: 'tf-vm-016'
-        TF_VAR_vm_network: 'NESTED-MGMT'
+       
 
         # Jira
         JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
@@ -234,6 +346,11 @@ stages:
     - publish: $(terraformDirectory)/resize.tfplan
       artifact: terraform-resize-plan
       displayName: 'Save Terraform Resize Plan'
+
+    - bash: |
+        rm -f "$(terraformDirectory)/resize-plan.json" "$(terraformDirectory)/resize.tfplan"
+      displayName: 'Clean up local plan files'
+      condition: always()
 
 
 # ============================================================
@@ -280,7 +397,7 @@ stages:
 
               inlineScript: |
 
-                set -e
+                set -euo pipefail
 
                 export ARM_USE_AZUREAD=true
                 export ARM_USE_OIDC=true
@@ -298,8 +415,15 @@ stages:
                 echo "Requested Memory: $TF_VAR_vm_memory MB"
                 echo "===================================="
 
+                # Revalidate VM name before using it in the remote state key.
+                if [[ ! "$TF_VAR_vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
+                  echo "ERROR: Invalid VM name supplied by Jira."
+                  exit 1
+                fi
+
                 # Re-open the same per-VM Terraform state before applying.
                 terraform init \
+                  -input=false \
                   -reconfigure \
                   -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
@@ -338,11 +462,14 @@ stages:
               TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
               TF_VAR_vm_memory: ${{ parameters.vm_memory }}
 
-              # Temporary values for TF-VM-016 test
-              TF_VAR_vm_hostname: 'tf-vm-016'
-              TF_VAR_vm_network: 'NESTED-MGMT'
+            
 
               JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+          - bash: |
+              rm -f "$(terraformDirectory)/resize.tfplan"
+            displayName: 'Clean up applied plan file'
+            condition: always()
 
 
 
