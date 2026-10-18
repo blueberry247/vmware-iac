@@ -47,6 +47,13 @@ variable "vm_network" {
   description = "vSphere network"
   type        = string
 }
+
+variable "vm_datastore_id" {
+  description = "Existing vSphere datastore ID to preserve during a resize"
+  type        = string
+  default     = null
+}
+
 variable "vm_os" {
   description = "Operating system selected in Jira"
   type        = string

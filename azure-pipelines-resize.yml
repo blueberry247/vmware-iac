@@ -221,6 +221,23 @@ stages:
             exit 1
           fi
 
+          # Preserve the VM's current datastore. The normal provisioning
+          # configuration selects a default datastore, which could otherwise
+          # appear as an unintended datastore move during a resize.
+          TF_VAR_vm_datastore_id=$(terraform state show -no-color \
+            "$VM_RESOURCE" |
+            sed -n 's/^[[:space:]]*datastore_id[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
+            head -1)
+
+          if [ -z "$TF_VAR_vm_datastore_id" ]; then
+            echo "ERROR: Could not determine the VM datastore from Terraform state."
+            echo "Resize cancelled."
+            exit 1
+          fi
+
+          export TF_VAR_vm_datastore_id
+          echo "Existing VM datastore: $TF_VAR_vm_datastore_id"
+
           echo ""
           echo "VM identity verification passed."
 
@@ -472,7 +489,6 @@ stages:
               rm -f "$(terraformDirectory)/resize.tfplan"
             displayName: 'Clean up applied plan file'
             condition: always()
-
 
 
 

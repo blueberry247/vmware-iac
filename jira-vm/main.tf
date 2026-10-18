@@ -146,7 +146,9 @@ locals {
   ) : data.vsphere_virtual_machine.template
 
   # Select the correct datastore
-  selected_datastore_id = local.is_windows ? (
-    data.vsphere_datastore.windows_datastore[0].id
-  ) : data.vsphere_datastore.datastore.id
+  selected_datastore_id = var.vm_datastore_id != null ? var.vm_datastore_id : (
+    local.is_windows ? (
+      data.vsphere_datastore.windows_datastore[0].id
+    ) : data.vsphere_datastore.datastore.id
+  )
 }
