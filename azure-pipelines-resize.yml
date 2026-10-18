@@ -151,32 +151,32 @@ stages:
             -reconfigure \
             -backend-config="key=jira-vms/${TF_VAR_vm_name}.tfstate"
 
-          # Retrieve existing VM settings from Terraform state
+          # These variables are required by the Terraform configuration and
+          # are retained from the VM's existing state outputs.
           TF_VAR_vm_hostname="$(terraform output -raw vm_hostname)"
           TF_VAR_vm_network="$(terraform output -raw vm_network)"
-          TF_VAR_vm_os="$(terraform output -raw vm_os)"
 
-          # Stop if any existing VM setting is missing
-          if [ -z "$TF_VAR_vm_hostname" ] || \
-            [ -z "$TF_VAR_vm_network" ] || \
-            [ -z "$TF_VAR_vm_os" ]; then
-            echo "ERROR: Existing VM hostname, network or OS is missing."
-            exit 1
-          fi
-
-          # Only allow supported operating systems
-          if [ "$TF_VAR_vm_os" != "Debian 13" ] && \
-            [ "$TF_VAR_vm_os" != "Windows Server 2022" ]; then
-            echo "ERROR: Unsupported VM operating system."
+          if [ -z "$TF_VAR_vm_hostname" ] || [ -z "$TF_VAR_vm_network" ]; then
+            echo "ERROR: Existing VM hostname or network is missing."
             exit 1
           fi
 
           export TF_VAR_vm_hostname
           export TF_VAR_vm_network
-          export TF_VAR_vm_os
 
-          echo "Existing VM hostname: $TF_VAR_vm_hostname"
-          echo "Existing VM network:  $TF_VAR_vm_network"
+          # Detect the operating system from resources present in this VM's
+          # state. Do not use `terraform output` here: older VM states may
+          # predate the vm_os output even though the VM is valid.
+          if terraform state list | grep -Fxq 'data.vsphere_virtual_machine.windows_template[0]'; then
+            export TF_VAR_vm_os='Windows Server 2022'
+          elif terraform state list | grep -Fxq 'data.vsphere_virtual_machine.template'; then
+            export TF_VAR_vm_os='Debian 13'
+          else
+            echo "ERROR: Unable to establish Windows/Debian template from state."
+            exit 1
+          fi
+
+          echo "Operating system selected from state: $TF_VAR_vm_os"
 
           # ----------------------------------------------------
           # SAFETY CHECK 1
@@ -470,8 +470,6 @@ stages:
               rm -f "$(terraformDirectory)/resize.tfplan"
             displayName: 'Clean up applied plan file'
             condition: always()
-
-
 
 
 
