@@ -134,7 +134,9 @@ stages:
           echo "===================================="
           echo "VM RESIZE REQUEST"
           echo "===================================="
-          echo "Jira Issue:       $JIRA_ISSUE_KEY"
+          # Jira issue is traceability-only; do not fail the shell if the
+          # webhook did not provide it.
+          echo "Jira Issue:       ${JIRA_ISSUE_KEY:-not-provided}"
           echo "VM Name:          $TF_VAR_vm_name"
           echo "Requested CPU:    $TF_VAR_vm_cpu"
           echo "Requested Memory: $TF_VAR_vm_memory MB"
@@ -470,7 +472,6 @@ stages:
               rm -f "$(terraformDirectory)/resize.tfplan"
             displayName: 'Clean up applied plan file'
             condition: always()
-
 
 
 
