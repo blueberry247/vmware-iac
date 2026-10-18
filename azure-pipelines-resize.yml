@@ -221,22 +221,70 @@ stages:
             exit 1
           fi
 
-          # Preserve the VM's current datastore. The normal provisioning
-          # configuration selects a default datastore, which could otherwise
-          # appear as an unintended datastore move during a resize.
-          TF_VAR_vm_datastore_id=$(terraform state show -no-color \
-            "$VM_RESOURCE" |
-            sed -n 's/^[[:space:]]*datastore_id[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' |
-            head -1)
+          # ----------------------------------------------------
+          # DATASTORE PRESERVATION: use the LIVE VMware value.
+          # A plain `terraform state show` can return a STALE datastore ID
+          # after a Storage vMotion/manual move. That is what happened to
+          # TF-VM-013: state said datastore-1140, vCenter said datastore-22.
+          #
+          # A refresh-only PLAN reads the real values from vSphere without
+          # modifying either the VM or the remote Terraform state. It is
+          # NEVER applied. Only its refreshed VM datastore value is used.
+          # ----------------------------------------------------
+          echo "Discovering the VM's current datastore from vSphere..."
+          rm -f datastore-refresh.tfplan datastore-refresh.json
+          trap 'rm -f datastore-refresh.tfplan datastore-refresh.json' EXIT
 
-          if [ -z "$TF_VAR_vm_datastore_id" ]; then
-            echo "ERROR: Could not determine the VM datastore from Terraform state."
-            echo "Resize cancelled."
-            exit 1
-          fi
+          terraform plan \
+            -refresh-only \
+            -input=false \
+            -no-color \
+            -out=datastore-refresh.tfplan > /dev/null
+
+          # JSON plans can contain sensitive information. Never print them.
+          terraform show -json datastore-refresh.tfplan > datastore-refresh.json
+
+          TF_VAR_vm_datastore_id="$(python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          TARGET = "module.vm.vsphere_virtual_machine.vm"
+          vm_name = os.environ["TF_VAR_vm_name"]
+
+          with open("datastore-refresh.json", encoding="utf-8") as f:
+              document = json.load(f)
+
+          # Terraform stores resources within nested modules, not necessarily
+          # in planned_values.root_module.resources.
+          def walk(module):
+              for resource in module.get("resources", []):
+                  yield resource
+              for child in module.get("child_modules", []):
+                  yield from walk(child)
+
+          root = (document.get("planned_values") or {}).get("root_module") or {}
+          matches = [r for r in walk(root)
+                     if r.get("address") == TARGET and r.get("mode") == "managed"]
+          if len(matches) != 1:
+              sys.exit("ERROR: Cannot uniquely identify the VM in refreshed vSphere state.")
+
+          values = matches[0].get("values") or {}
+          if values.get("name") != vm_name or not values.get("id"):
+              sys.exit("ERROR: Refreshed vSphere VM identity does not match Jira request.")
+
+          datastore = values.get("datastore_id")
+          if not isinstance(datastore, str) or not re.fullmatch(r"datastore-[0-9]+", datastore):
+              sys.exit("ERROR: VMware did not return a valid VM datastore ID.")
+
+          print(datastore)
+          PY
+          )"
 
           export TF_VAR_vm_datastore_id
-          echo "Existing VM datastore: $TF_VAR_vm_datastore_id"
+          echo "Verified live VM datastore ID: $TF_VAR_vm_datastore_id"
+          rm -f datastore-refresh.tfplan datastore-refresh.json
 
           echo ""
           echo "VM identity verification passed."
@@ -281,6 +329,7 @@ stages:
           expected_name = os.environ["TF_VAR_vm_name"]
           expected_cpu = int(os.environ["TF_VAR_vm_cpu"])
           expected_memory = int(os.environ["TF_VAR_vm_memory"])
+          expected_datastore = os.environ["TF_VAR_vm_datastore_id"]
           updates = 0
 
           for resource in plan.get("resource_changes", []):
@@ -302,6 +351,9 @@ stages:
               after = change.get("after") or {}
               if before.get("name") != expected_name or after.get("name") != expected_name:
                   fail("VM name does not match the Jira request")
+              if (before.get("datastore_id") != expected_datastore or
+                      after.get("datastore_id") != expected_datastore):
+                  fail("Datastore does not match the live vSphere datastore")
 
               changed = {key for key in set(before) | set(after)
                          if before.get(key) != after.get(key)}
