@@ -37,3 +37,8 @@ output "vm_memory" {
   description = "Memory configured for the VM in MB"
   value       = var.vm_memory
 }
+
+output "vm_os" {
+  description = "Operating system selected when provisioning the VM"
+  value       = var.vm_os
+}
