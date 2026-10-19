@@ -1,0 +1,109 @@
+# One-time Jira-only completion for the ALREADY resized TF-VM-013.
+# This pipeline does NOT run Terraform, contact vCenter, or resize a VM.
+# It WILL add a Jira completion comment and move IT-30 to Resolved.
+trigger: none
+pr: none
+
+pool:
+  name: VMware-Lab
+
+variables:
+- group: VMware-Terraform-Secrets
+
+steps:
+- checkout: none
+- bash: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import base64
+    import json
+    import os
+    import re
+    import sys
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import quote, urlsplit
+    from urllib.request import Request, urlopen
+
+    ISSUE = 'IT-30'
+    VM = 'TF-VM-013'
+    base = os.environ['JIRA_BASE_URL'].strip().rstrip('/')
+    email = os.environ['JIRA_EMAIL'].strip()
+    token = os.environ['JIRA_API_TOKEN']
+    parsed = urlsplit(base)
+    if parsed.scheme != 'https' or not parsed.netloc or parsed.path:
+        sys.exit('FAILED: Jira base URL must be a bare HTTPS site URL.')
+    if not email or not token:
+        sys.exit('FAILED: Missing Jira credentials.')
+
+    credentials = base64.b64encode(f'{email}:{token}'.encode()).decode()
+    headers = {
+        'Authorization': 'Basic ' + credentials,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+    }
+
+    def request(method, path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        try:
+            with urlopen(Request(base + path, data=data, headers=headers,
+                                 method=method), timeout=30) as response:
+                raw = response.read()
+                return json.loads(raw) if raw else {}
+        except HTTPError as exc:
+            sys.exit(f'FAILED: Jira returned HTTP {exc.code} for {method} request. ' +
+                     'Check Jira issue permissions and any transition requirements.')
+        except (URLError, TimeoutError) as exc:
+            sys.exit(f'FAILED: Jira connection error ({type(exc).__name__}).')
+
+    path = '/rest/api/3/issue/' + quote(ISSUE, safe='')
+    details = request('GET', path + '?fields=summary,status')
+    if details.get('key') != ISSUE:
+        sys.exit('FAILED: Jira returned the wrong issue.')
+    summary = (details.get('fields') or {}).get('summary') or ''
+    if not re.search(r'(?<![A-Za-z0-9-])TF-VM-013(?![A-Za-z0-9-])', summary, re.I):
+        sys.exit('FAILED: IT-30 summary does not identify TF-VM-013. Review manually.')
+    status_info = (details.get('fields') or {}).get('status') or {}
+    status = status_info.get('name', '')
+    category = ((status_info.get('statusCategory') or {}).get('key') or '').casefold()
+    if category == 'done':
+        print(f'SKIPPED: {ISSUE} is already in the Done category ({status}).')
+        sys.exit(0)
+
+    transitions = request('GET', path + '/transitions').get('transitions') or []
+    matches = [t for t in transitions
+               if (t.get('to') or {}).get('name', '').casefold() == 'resolved'
+               and ((t.get('to') or {}).get('statusCategory') or {}).get('key', '').casefold() == 'done']
+    if len(matches) != 1:
+        sys.exit('FAILED: Expected exactly one available transition to Resolved (Done).')
+
+    # This message refers to an ALREADY successful Terraform apply; it does not
+    # claim that the VM is powered on or that its guest operating system is healthy.
+    lines = [
+        'VM resize completed successfully (previous Azure DevOps deployment).',
+        'Jira request: IT-30',
+        'Virtual machine: TF-VM-013',
+        'CPU: 2 -> 4 vCPU',
+        'Memory: 2048 -> 4096 MB',
+        'Terraform apply: 0 added, 1 changed, 0 destroyed.',
+        'Validated resize plan allowed only CPU and memory changes; no datastore migration.',
+        'Power-on and guest operating system health require separate verification.',
+    ]
+    adf = {'type': 'doc', 'version': 1,
+           'content': [{'type': 'paragraph',
+                        'content': [{'type': 'text', 'text': line}]} for line in lines]}
+    request('POST', path + '/transitions', {
+        'transition': {'id': matches[0]['id']},
+        'update': {'comment': [{'add': {'body': adf}}]},
+    })
+    updated = request('GET', path + '?fields=status').get('fields', {}).get('status') or {}
+    updated_name = updated.get('name', '')
+    updated_category = ((updated.get('statusCategory') or {}).get('key') or '').casefold()
+    if updated_name.casefold() != 'resolved' or updated_category != 'done':
+        sys.exit(f'FAILED: Ticket status after transition is {updated_name!r}; inspect Jira.')
+    print('SUCCESS: Added IT-30 completion comment and moved issue to Resolved (Done).')
+    PY
+  displayName: 'Complete IT-30 in Jira only — no Terraform'
+  env:
+    JIRA_BASE_URL: $(JIRA_BASE_URL)
+    JIRA_EMAIL: $(JIRA_EMAIL)
+    JIRA_API_TOKEN: $(JIRA_API_TOKEN)
