@@ -12,7 +12,7 @@
 #   3. The plan is saved as an Azure DevOps artifact.
 #   4. The VMware-Resize-Approval environment pauses the pipeline for approval.
 #   5. Stage 2 downloads and applies the exact approved plan.
-#   6. Only after successful apply: add a Jira comment and move to Done.
+#   6. Only after successful apply: add a Jira comment and move to Resolved (Done category).
 #
 # Important: this pipeline changes an existing VM. It does not create a new VM.
 # ============================================================
@@ -118,15 +118,17 @@ stages:
                 sys.exit(f'JIRA PREFLIGHT FAILED: Jira is not reachable: {e.reason if hasattr(e, "reason") else e}')
 
         path = '/rest/api/3/issue/' + quote(issue, safe='')
-        status = fetch(path + '?fields=status').get('fields', {}).get('status', {}).get('name', '')
-        if status.casefold() == 'done':
-            sys.exit(f'JIRA PREFLIGHT FAILED: {issue} is already Done; refusing to resize on a completed request.')
+        status_info = fetch(path + '?fields=status').get('fields', {}).get('status') or {}
+        status = status_info.get('name', '')
+        category = (status_info.get('statusCategory') or {}).get('key', '')
+        if category == 'done' or status.casefold() in {'resolved', 'closed', 'done'}:
+            sys.exit(f'JIRA PREFLIGHT FAILED: {issue} is already completed ({status}); refusing to resize a completed request.')
         transitions = fetch(path + '/transitions').get('transitions', [])
-        done = [t for t in transitions if (t.get('to') or {}).get('name', '').casefold() == 'done']
-        if len(done) != 1:
+        resolved = [t for t in transitions if (t.get('to') or {}).get('name', '').casefold() == 'resolved']
+        if len(resolved) != 1:
             options = ', '.join((t.get('to') or {}).get('name','?') for t in transitions)
-            sys.exit(f'JIRA PREFLIGHT FAILED: Need exactly one accessible transition to Done. Available: {options or "none"}')
-        print(f'Jira preflight passed: {issue}, current status {status}, Done transition available.')
+            sys.exit(f'JIRA PREFLIGHT FAILED: Need exactly one accessible transition to Resolved. Available: {options or "none"}')
+        print(f'Jira preflight passed: {issue}, current status {status}, Resolved transition available.')
         PYCODE
       displayName: 'Verify Jira can be completed'
       env:
@@ -618,7 +620,7 @@ stages:
               JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
 
           # Only execute after Terraform apply succeeds.
-          # Comment on the original Jira ticket, then transition it to Done.
+          # Comment on the original Jira ticket, then transition it to Resolved (Done category).
           # Jira's completion failure will fail this job, but does NOT undo
           # a successful Terraform apply; do not rerun a resize to retry Jira.
           - bash: |
@@ -662,15 +664,17 @@ stages:
                       sys.exit(f'JIRA SYNC FAILED (Terraform already applied): Jira unreachable: {exc.reason if hasattr(exc, "reason") else exc}')
 
               path = '/rest/api/3/issue/' + quote(issue, safe='')
-              status = api('GET', path + '?fields=status').get('fields', {}).get('status', {}).get('name', '')
-              if status.casefold() == 'done':
-                  print(f'{issue} is already Done; no duplicate comment or transition created.')
+              status_info = api('GET', path + '?fields=status').get('fields', {}).get('status') or {}
+              status = status_info.get('name', '')
+              category = (status_info.get('statusCategory') or {}).get('key', '')
+              if category == 'done' or status.casefold() in {'resolved', 'closed', 'done'}:
+                  print(f'{issue} is already completed ({status}); no duplicate comment or transition created.')
                   sys.exit(0)
 
               transitions = api('GET', path + '/transitions').get('transitions', [])
-              done = [t for t in transitions if (t.get('to') or {}).get('name', '').casefold() == 'done']
-              if len(done) != 1:
-                  sys.exit('JIRA SYNC FAILED (Terraform already applied): no unique available Done transition.')
+              resolved = [t for t in transitions if (t.get('to') or {}).get('name', '').casefold() == 'resolved']
+              if len(resolved) != 1:
+                  sys.exit('JIRA SYNC FAILED (Terraform already applied): no unique available Resolved transition.')
 
               message = (
                   'VM RESIZE COMPLETED SUCCESSFULLY\n'
@@ -691,15 +695,17 @@ stages:
               # Jira Cloud supports posting a comment as part of the same
               # workflow transition. If transition fails, neither should be written.
               api('POST', path + '/transitions', {
-                  'transition': {'id': done[0]['id']},
+                  'transition': {'id': resolved[0]['id']},
                   'update': {'comment': [{'add': {'body': adf}}]},
               })
-              new_status = api('GET', path + '?fields=status').get('fields', {}).get('status', {}).get('name', '')
-              if new_status.casefold() != 'done':
-                  sys.exit(f'JIRA SYNC FAILED: transition returned but status is {new_status!r}; needs investigation.')
-              print(f'Jira {issue}: success comment added and status transitioned to Done.')
+              new_status_info = api('GET', path + '?fields=status').get('fields', {}).get('status') or {}
+              new_status = new_status_info.get('name', '')
+              new_category = (new_status_info.get('statusCategory') or {}).get('key', '')
+              if new_status.casefold() != 'resolved' or new_category != 'done':
+                  sys.exit(f'JIRA SYNC FAILED: transition returned but status is {new_status!r} (category {new_category!r}); needs investigation.')
+              print(f'Jira {issue}: success comment added and status transitioned to Resolved (Done category).')
               PYCODE
-            displayName: 'Add Jira success comment and transition to Done'
+            displayName: 'Add Jira success comment and transition to Resolved'
             condition: succeeded()
             env:
               JIRA_BASE_URL: $(JIRA_BASE_URL)
