@@ -1,0 +1,47 @@
+parameters:
+- name: jira_issue_key
+  type: string
+- name: vm_name
+  type: string
+
+jobs:
+- job: TerraformDestroyPlan
+  displayName: Verify VM State and Create Destroy Plan
+  steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: Verify VM State and Create Destroy Plan
+    inputs:
+      azureSubscription: 'Azure-Terraform-State'
+      scriptType: bash
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
+        source "$(Build.SourcesDirectory)/scripts/terraform-auth.sh"
+        bash "$(Build.SourcesDirectory)/scripts/decommission-create-plan.sh"
+    env:
+      TF_WORKDIR: $(terraformDirectory)
+      TF_VAR_vsphere_user: $(VSPHERE_USER)
+      TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+      TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+      TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+      TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+      TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
+      TF_VAR_vm_name: ${{ parameters.vm_name }}
+      TF_VAR_vm_hostname: decommission
+      TF_VAR_vm_cpu: '1'
+      TF_VAR_vm_memory: '1024'
+      TF_VAR_vm_network: NESTED-MGMT
+      JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+  # Never publish a plaintext Terraform destroy plan.
+  - publish: $(terraformDirectory)/destroy.tfplan.gpg
+    artifact: terraform-destroy-plan
+    displayName: Save Encrypted Terraform Destroy Plan
+
+  - bash: |
+      rm -f "$(terraformDirectory)/destroy.tfplan" "$(terraformDirectory)/destroy.tfplan.gpg"
+    displayName: Clean up local destroy plans
+    condition: always()

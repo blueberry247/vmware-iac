@@ -1,0 +1,65 @@
+parameters:
+- name: jira_issue_key
+  type: string
+- name: vm_name
+  type: string
+
+jobs:
+- deployment: TerraformDestroy
+  displayName: Decommission VMware VM
+  # Approval/checks must be configured on this Azure DevOps environment.
+  environment: VMware-Production
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+        - checkout: self
+        - download: current
+          artifact: terraform-destroy-plan
+          displayName: Download Approved Destroy Plan
+
+        - task: AzureCLI@2
+          displayName: Apply Approved Terraform Destroy Plan
+          inputs:
+            azureSubscription: 'Azure-Terraform-State'
+            scriptType: bash
+            scriptLocation: inlineScript
+            addSpnToEnvironment: true
+            inlineScript: |
+              set -euo pipefail
+              source "$(Build.SourcesDirectory)/scripts/terraform-auth.sh"
+              bash "$(Build.SourcesDirectory)/scripts/decommission-apply-plan.sh"
+          env:
+            TF_WORKDIR: $(terraformDirectory)
+            APPROVED_PLAN: $(Pipeline.Workspace)/terraform-destroy-plan/destroy.tfplan.gpg
+            TF_VAR_vsphere_user: $(VSPHERE_USER)
+            TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+            TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+            TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+            TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+            TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
+            TF_VAR_vm_name: ${{ parameters.vm_name }}
+            TF_VAR_vm_hostname: decommission
+            TF_VAR_vm_cpu: '1'
+            TF_VAR_vm_memory: '1024'
+            TF_VAR_vm_network: NESTED-MGMT
+            JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+        # A Jira failure must never cause the already-applied destroy plan
+        # to be replayed. Retry only this comment operation if necessary.
+        - bash: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/decommission-jira-comment.py"
+          displayName: Add Jira decommission success comment
+          condition: succeeded()
+          env:
+            JIRA_BASE_URL: $(JIRA_BASE_URL)
+            JIRA_EMAIL: $(JIRA_EMAIL)
+            JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+            JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+            VM_NAME: ${{ parameters.vm_name }}
+
+        - bash: |
+            rm -f "$(terraformDirectory)/destroy.tfplan"
+          displayName: Clean up local destroy plan
+          condition: always()
