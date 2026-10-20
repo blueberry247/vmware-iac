@@ -1,0 +1,118 @@
+parameters:
+- name: request
+  type: object
+
+stages:
+- stage: PostDeploy
+  displayName: 'VM Configuration and Jira Update'
+  dependsOn:
+  - Plan
+  - Apply
+  # A no-op Plan resumes configuration without recreating the existing VM.
+  # A failed Plan/required Apply must never reach PostDeploy.
+  condition: |
+    and(
+      eq(dependencies.Plan.result, 'Succeeded'),
+      ne('${{ parameters.request.vm_name }}', ''),
+      or(
+        and(
+          eq(dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'], 'false'),
+          eq(dependencies.Apply.result, 'Skipped')
+        ),
+        and(
+          eq(dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'], 'true'),
+          eq(dependencies.Apply.result, 'Succeeded')
+        )
+      )
+    )
+  jobs:
+  - job: ConfigureVM
+    displayName: 'Verify VM, configure with Ansible, update and resolve Jira'
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      displayName: 'Read VM IP from Terraform state'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -euo pipefail
+          export ARM_USE_AZUREAD=true ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+          bash "$(Build.SourcesDirectory)/scripts/provision-read-ip.sh"
+      env:
+        TF_WORKING_DIR: $(terraformDirectory)
+        TF_VAR_vm_name: ${{ parameters.request.vm_name }}
+
+    - task: Bash@3
+      displayName: 'Ansible - Configure Windows Server 2022'
+      condition: and(succeeded(), eq('${{ parameters.request.vm_os }}', 'Windows Server 2022'))
+      inputs:
+        targetType: filePath
+        filePath: '$(Build.SourcesDirectory)/scripts/provision-windows-ready.sh'
+      env:
+        VM_IP: $(PROVISIONED_VM_IP)
+        WINDOWS_ADMIN_PASSWORD: $(WINDOWS_ADMIN_PASSWORD)
+
+    - task: Bash@3
+      displayName: 'VMware - Register Debian SSH host key'
+      condition: and(succeeded(), eq('${{ parameters.request.vm_os }}', 'Debian 13'))
+      inputs:
+        targetType: filePath
+        filePath: '$(Build.SourcesDirectory)/scripts/provision-register-debian-host-key.sh'
+      env:
+        VM_NAME: ${{ parameters.request.vm_name }}
+        VM_IP: $(PROVISIONED_VM_IP)
+        BUILD_ID: $(Build.BuildId)
+        GOVC_URL: $(VSPHERE_SERVER)
+        GOVC_USERNAME: $(VSPHERE_USER)
+        GOVC_PASSWORD: $(VSPHERE_PASSWORD)
+        GOVC_GUEST_LOGIN: $(DEBIAN_GUEST_LOGIN)
+
+    - task: Bash@3
+      displayName: 'Ansible - Verify Debian 13 readiness'
+      condition: and(succeeded(), eq('${{ parameters.request.vm_os }}', 'Debian 13'))
+      inputs:
+        targetType: filePath
+        filePath: '$(Build.SourcesDirectory)/scripts/provision-debian-ready.sh'
+      env:
+        VM_IP: $(PROVISIONED_VM_IP)
+
+    - task: Bash@3
+      displayName: 'Update Jira with VM details'
+      condition: succeeded()
+      inputs:
+        targetType: inline
+        script: |
+          set -euo pipefail
+          python3 "$(Build.SourcesDirectory)/scripts/provision-jira-comment.py"
+      env:
+        JIRA_BASE_URL: $(JIRA_BASE_URL)
+        JIRA_EMAIL: $(JIRA_EMAIL)
+        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+        JIRA_ISSUE_KEY: ${{ parameters.request.jira_issue_key }}
+        VM_HOSTNAME: ${{ parameters.request.vm_hostname }}
+        VM_NAME_PARAMETER: ${{ parameters.request.vm_name }}
+        PROVISIONED_VM_IP: $(PROVISIONED_VM_IP)
+
+    # Resolve only after the preceding VM readiness and Jira comment steps pass.
+    # Jira transition IDs vary by workflow, so the script discovers the available
+    # transition to the Resolved status (Done category) and verifies Resolution.
+    - task: Bash@3
+      displayName: 'Resolve Jira provisioning ticket'
+      condition: succeeded()
+      inputs:
+        targetType: inline
+        script: |
+          set -euo pipefail
+          python3 "$(Build.SourcesDirectory)/scripts/provision-jira-resolve.py"
+      env:
+        JIRA_BASE_URL: $(JIRA_BASE_URL)
+        JIRA_EMAIL: $(JIRA_EMAIL)
+        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+        JIRA_ISSUE_KEY: ${{ parameters.request.jira_issue_key }}
+        JIRA_RESOLVED_STATUS: 'Resolved'

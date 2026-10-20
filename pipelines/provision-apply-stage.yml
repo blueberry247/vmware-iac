@@ -1,0 +1,59 @@
+parameters:
+- name: request
+  type: object
+
+stages:
+- stage: Apply
+  displayName: 'Terraform Apply'
+  dependsOn:
+  - Plan
+  condition: |
+    and(
+      succeeded(),
+      ne('${{ parameters.request.vm_name }}', ''),
+      eq(
+        dependencies.Plan.outputs['TerraformPlan.terraformPlan.changesDetected'],
+        'true'
+      )
+    )
+  jobs:
+  - deployment: TerraformApply
+    displayName: 'Create VMware VM'
+    environment: 'VMware-Production' # Existing manual approval check remains mandatory.
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - download: current
+            artifact: terraform-plan
+            displayName: 'Download Terraform Plan'
+          - task: AzureCLI@2
+            displayName: 'Terraform Apply'
+            inputs:
+              azureSubscription: 'Azure-Terraform-State'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_USE_AZUREAD=true ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
+                bash "$(Build.SourcesDirectory)/scripts/provision-apply.sh"
+            env:
+              TF_WORKING_DIR: $(terraformDirectory)
+              PLAN_ARTIFACT_FILE: $(Pipeline.Workspace)/terraform-plan/tfplan.gpg
+              TF_VAR_vsphere_user: $(VSPHERE_USER)
+              TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+              TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+              TF_VAR_vm_os: ${{ parameters.request.vm_os }}
+              TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+              TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+              TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
+              TF_VAR_vm_name: ${{ parameters.request.vm_name }}
+              TF_VAR_vm_hostname: ${{ parameters.request.vm_hostname }}
+              TF_VAR_vm_cpu: ${{ parameters.request.vm_cpu }}
+              TF_VAR_vm_memory: ${{ parameters.request.vm_memory }}
+              TF_VAR_vm_network: ${{ parameters.request.vm_network }}
