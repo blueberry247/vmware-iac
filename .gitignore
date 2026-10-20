@@ -36,3 +36,6 @@ azure-pipelines-backup.yml
 
 # Terraform state files
 *.tfstate
+# Python temporary files
+__pycache__/
+*.pyc

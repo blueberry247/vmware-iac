@@ -1,0 +1,68 @@
+parameters:
+- name: jira_issue_key
+  type: string
+- name: vm_name
+  type: string
+- name: vm_cpu
+  type: number
+- name: vm_memory
+  type: number
+
+jobs:
+- deployment: TerraformResizeApply
+  displayName: Apply Approved Resize Plan
+  # Approval/checks are configured on this Azure DevOps Environment,
+  # not in the YAML itself.
+  environment: VMware-Resize-Approval
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+        - checkout: self
+        - download: current
+          artifact: terraform-resize-plan
+          displayName: Download Approved Resize Plan
+
+        - task: AzureCLI@2
+          displayName: Apply Terraform Resize Plan
+          inputs:
+            azureSubscription: 'Azure-Terraform-State'
+            scriptType: bash
+            scriptLocation: inlineScript
+            addSpnToEnvironment: true
+            inlineScript: |
+              set -euo pipefail
+              source "$(Build.SourcesDirectory)/scripts/terraform-auth.sh"
+              bash "$(Build.SourcesDirectory)/scripts/apply-resize-plan.sh"
+          env:
+            TF_WORKDIR: $(terraformDirectory)
+            APPROVED_PLAN: $(Pipeline.Workspace)/terraform-resize-plan/resize.tfplan
+            TF_VAR_vsphere_user: $(VSPHERE_USER)
+            TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+            TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+            TF_VAR_vm_name: ${{ parameters.vm_name }}
+            TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
+            TF_VAR_vm_memory: ${{ parameters.vm_memory }}
+            JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+        # Apply must succeed before Jira is completed. If Jira fails,
+        # troubleshoot/retry Jira only; never replay an already applied plan.
+        - bash: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/jira.py" complete
+          displayName: Add Jira success comment and transition to Resolved
+          condition: succeeded()
+          env:
+            JIRA_BASE_URL: $(JIRA_BASE_URL)
+            JIRA_EMAIL: $(JIRA_EMAIL)
+            JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+            JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+            VM_NAME: ${{ parameters.vm_name }}
+            REQUESTED_CPU: ${{ parameters.vm_cpu }}
+            REQUESTED_MEMORY: ${{ parameters.vm_memory }}
+            BUILD_ID: $(Build.BuildId)
+
+        - bash: |
+            rm -f "$(terraformDirectory)/resize.tfplan"
+          displayName: Clean up local plan file
+          condition: always()

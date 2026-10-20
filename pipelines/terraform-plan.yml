@@ -1,0 +1,62 @@
+parameters:
+- name: jira_issue_key
+  type: string
+- name: vm_name
+  type: string
+- name: vm_cpu
+  type: number
+- name: vm_memory
+  type: number
+
+jobs:
+- job: TerraformResizePlan
+  displayName: Validate VM and Create Resize Plan
+  steps:
+  - checkout: self
+
+  - bash: |
+      set -euo pipefail
+      python3 "$(Build.SourcesDirectory)/scripts/jira.py" preflight
+    displayName: Verify Jira can be completed (read-only)
+    env:
+      JIRA_BASE_URL: $(JIRA_BASE_URL)
+      JIRA_EMAIL: $(JIRA_EMAIL)
+      JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+      JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+  - task: AzureCLI@2
+    displayName: Create and Validate Terraform Resize Plan
+    inputs:
+      azureSubscription: 'Azure-Terraform-State'
+      scriptType: bash
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
+        source "$(Build.SourcesDirectory)/scripts/terraform-auth.sh"
+        bash "$(Build.SourcesDirectory)/scripts/create-resize-plan.sh"
+    env:
+      TF_WORKDIR: $(terraformDirectory)
+      TF_VAR_vsphere_user: $(VSPHERE_USER)
+      TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+      TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+      TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+      TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+      TF_VAR_vm_name: ${{ parameters.vm_name }}
+      TF_VAR_vm_cpu: ${{ parameters.vm_cpu }}
+      TF_VAR_vm_memory: ${{ parameters.vm_memory }}
+      JIRA_ISSUE_KEY: ${{ parameters.jira_issue_key }}
+
+  # Preserve the EXACT approved plan. Treat this artifact as sensitive:
+  # it may contain VM settings and secrets from provider configuration.
+  - publish: $(terraformDirectory)/resize.tfplan
+    artifact: terraform-resize-plan
+    displayName: Save Terraform Resize Plan
+
+  - bash: |
+      rm -f "$(terraformDirectory)/resize-plan.json" \
+            "$(terraformDirectory)/datastore-refresh.json" \
+            "$(terraformDirectory)/datastore-refresh.tfplan" \
+            "$(terraformDirectory)/resize.tfplan"
+    displayName: Clean up local plan files
+    condition: always()
