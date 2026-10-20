@@ -1,59 +1,352 @@
-# Jira -> Azure DevOps -> Terraform -> VMware
-# This is the EXISTING resize pipeline entry point (not azure-pipelines.yml,
-# which may already be used for VM provisioning).
-# Stage 1 validates the request and publishes an exact plan.
-# Stage 2 requires the VMware-Resize-Approval environment's approval,
-# applies that plan, and marks Jira Resolved only on successful apply.
+
+# ============================================================
+# 1. PIPELINE TRIGGERS
+# ============================================================
+
+# Disable automatic pipeline execution when code is pushed.
+# The pipeline is triggered manually or through the Jira API.
 trigger: none
+
+# Disable automatic pipeline execution for pull requests.
+# Prevents VM resize jobs from running during PR validation.
 pr: none
 
+# ============================================================
+# 2. PIPELINE PARAMETERS
+# ============================================================
+#
+# Parameters contain the values required to resize a VM.
+#
+# Jira Automation supplies these values through an HTTP POST
+# request to the Azure DevOps Pipelines REST API.
+#
+# Example:
+#
+# jira_issue_key: IT-39
+# vm_name: TF-VM-027
+# vm_cpu: 4
+# vm_memory: 4096
+#
+# ============================================================
+
 parameters:
+
+# ------------------------------------------------------------
+# Jira Issue Key
+# ------------------------------------------------------------
+# Identifies the Jira ticket associated with the resize.
+#
+# Used for:
+# - Tracking the request
+# - Jira validation
+# - Updating Jira after successful deployment
+#
+# Example: IT-39
+
 - name: jira_issue_key
   displayName: Jira Issue Key
   type: string
   default: ''
+
+# ------------------------------------------------------------
+# VMware Virtual Machine Name
+# ------------------------------------------------------------
+# Specifies which existing VMware VM should be resized.
+#
+# Terraform uses the VM name to locate its individual
+# remote state file stored in Azure Storage.
+#
+# Example:
+# jira-vms/TF-VM-027.tfstate
+
 - name: vm_name
   displayName: VM Name
   type: string
   default: ''
+
+# ------------------------------------------------------------
+# Requested Virtual CPUs
+# ------------------------------------------------------------
+# Specifies the desired number of virtual CPUs.
+#
+# Terraform compares this value against the current
+# configuration stored in VMware.
+#
+# Example:
+# Current CPU: 2
+# Requested CPU: 4
+
 - name: vm_cpu
   displayName: Requested CPU
   type: number
   default: 2
+
+# ------------------------------------------------------------
+# Requested Virtual Machine Memory
+# ------------------------------------------------------------
+# Specifies the desired memory allocation in megabytes.
+#
+# Example:
+# 2048 MB = 2 GB
+# 4096 MB = 4 GB
+#
+# Terraform updates the VM configuration based on this value.
+
 - name: vm_memory
   displayName: Requested Memory (MB)
   type: number
   default: 2048
 
+# ============================================================
+# 3. AZURE DEVOPS AGENT POOL
+# ============================================================
+#
+# Specifies which Azure DevOps agent pool executes the jobs.
+#
+# VMware-Lab contains our self-hosted Linux build agent.
+#
+# The agent has access to:
+# - VMware vCenter
+# - Terraform CLI
+# - Azure Storage remote state
+# - Required automation scripts
+#
+# Using a self-hosted agent allows Terraform to communicate
+# with the VMware infrastructure inside our network.
+#
+# ============================================================
+
 pool:
   name: VMware-Lab
 
+# ============================================================
+# 4. PIPELINE VARIABLES
+# ============================================================
+#
+# Variables provide configuration values required by jobs.
+#
+# Sensitive information is stored in Azure DevOps
+# variable groups rather than being hardcoded in YAML.
+#
+# ============================================================
+
 variables:
+
+# ------------------------------------------------------------
+# Azure DevOps Variable Group
+# ------------------------------------------------------------
+# References the VMware-Terraform-Secrets variable group.
+#
+# This supplies configuration such as:
+# - VMware vCenter credentials
+# - VMware server address
+# - Terraform backend configuration
+# - Jira API credentials
+#
+# Sensitive values must be configured as secret variables.
+
 - group: VMware-Terraform-Secrets
+
+# ------------------------------------------------------------
+# Terraform Working Directory
+# ------------------------------------------------------------
+# Defines the location of the Terraform configuration.
+#
+# System.DefaultWorkingDirectory refers to the directory
+# where Azure DevOps checks out the Git repository.
+#
+# Terraform configuration is stored in:
+#
+# vmware-iac/
+#   jira-vm/
+#
+# Reusable scripts use this directory when executing
+# Terraform commands.
+
 - name: terraformDirectory
   value: '$(System.DefaultWorkingDirectory)/jira-vm'
 
+
+# ============================================================
+# 5. PIPELINE STAGES
+# ============================================================
+#
+# The pipeline contains TWO stages:
+#
+# STAGE 1: Terraform Resize Plan
+# STAGE 2: Approve and Apply VM Resize
+#
+# Separating planning and applying ensures changes are
+# validated before being deployed.
+#
+# ============================================================
+
 stages:
+
+# ============================================================
+# STAGE 1 - TERRAFORM RESIZE PLAN
+# ============================================================
+#
+# PURPOSE:
+# Validate the Jira request and generate a Terraform plan.
+#
+# This stage does NOT apply infrastructure changes.
+#
+# The reusable template performs tasks such as:
+#
+# 1. Validate Jira request details.
+# 2. Initialise Terraform using Azure remote state.
+# 3. Identify the existing VMware VM.
+# 4. Verify the VM name matches Terraform state.
+# 5. Detect the VM operating system.
+# 6. Discover and preserve the existing datastore.
+# 7. Generate the Terraform resize plan.
+# 8. Validate that only approved settings change.
+# 9. Publish the exact plan for the apply stage.
+#
+# ============================================================
+
 - stage: ResizePlan
+
+
+ # Friendly stage name displayed in Azure DevOps.
   displayName: Terraform Resize Plan
+
+ #----------------------------------------------------------
+ # Stage Execution Condition
+ # ----------------------------------------------------------
+ #
+ # Run this stage ONLY when:
+ #
+ # 1. Previous execution conditions are successful.
+ # 2. The VM name parameter is not empty.
+ #
+ # Prevents the pipeline from creating a resize plan
+ # when a VM name has not been supplied.
+
   condition: |
     and(succeeded(), ne('${{ parameters.vm_name }}', ''))
+
+  # ----------------------------------------------------------
+  # Reusable Terraform Planning Template
+  # ----------------------------------------------------------
+  #
+  # Instead of placing hundreds of lines of Bash and Python
+  # directly inside this pipeline, we call a YAML template.
+  #
+  # Template location:
+  #
+  # pipelines/terraform-plan.yml
+  #
+  # That template calls reusable scripts responsible for
+  # Terraform planning, datastore discovery and validation.
+  #
+  # The same parameters received from Jira are passed
+  # into the template.
+
   jobs:
   - template: pipelines/terraform-plan.yml
     parameters:
+
+      # Jira ticket associated with the resize request.
       jira_issue_key: ${{ parameters.jira_issue_key }}
+      # VMware VM to resize.
       vm_name: ${{ parameters.vm_name }}
+      # Requested CPU configuration.
       vm_cpu: ${{ parameters.vm_cpu }}
+      # Requested memory configuration.
       vm_memory: ${{ parameters.vm_memory }}
 
+  # ============================================================
+  # STAGE 2 - APPROVE AND APPLY VM RESIZE
+  # ============================================================
+  #
+  # PURPOSE:
+  # This stage applies the Terraform resize plan created
+  # and validated during Stage 1 (ResizePlan).
+  #
+  # WORKFLOW:
+  # 1. Wait for the Terraform planning stage to succeed.
+  # 2. Request approval through the Azure DevOps environment.
+  # 3. Download the previously generated Terraform plan.
+  # 4. Apply the approved plan to the VMware virtual machine.
+  # 5. Update the associated Jira ticket after successful apply.
+  #
+  # IMPORTANT:
+  # The pipeline applies the exact Terraform plan generated
+  # during Stage 1 rather than creating a new plan.
+  #
+  # ============================================================
+
+# Define the second stage of the pipeline.
 - stage: ResizeApply
+# Friendly name displayed in the Azure DevOps pipeline.
   displayName: Approve and Apply VM Resize
+  # ----------------------------------------------------------
+  # STAGE DEPENDENCY
+  # ----------------------------------------------------------
+  #
+  # ResizeApply depends on ResizePlan.
+  #
+  # The apply stage cannot proceed unless the previous
+  # planning and validation stage has completed successfully
+
   dependsOn: ResizePlan
+
+  # ----------------------------------------------------------
+  # EXECUTION CONDITION
+  # ----------------------------------------------------------
+  #
+  # Only execute this stage if ResizePlan succeeds.
+  #
+  # If Terraform planning fails or an unexpected VM
+  # configuration change is detected, the apply stage
+  # will not execute.
   condition: succeeded()
+
+  # ----------------------------------------------------------
+  # REUSABLE TERRAFORM APPLY TEMPLATE
+  # ----------------------------------------------------------
+  #
+  # Instead of including all Terraform deployment commands
+  # inside this YAML file, we call a reusable template.
+  #
+  # Template location:
+  # pipelines/terraform-apply.yml
+  #
+  # The template handles:
+  # - Azure DevOps deployment approval
+  # - Downloading the validated Terraform plan
+  # - Terraform authentication and initialisation
+  # - Applying the exact approved plan
+  # - Updating the Jira ticket after a successful apply
+  # - Cleaning up temporary files
+  #
+  # This keeps the main pipeline short and maintainable.
+
   jobs:
   - template: pipelines/terraform-apply.yml
+
+   # --------------------------------------------------------
+    # PARAMETERS PASSED TO THE TEMPLATE
+    # --------------------------------------------------------
+    #
+    # Azure DevOps passes the same values originally
+    # supplied by Jira to the reusable apply template.
+    #
+    # These ensure Terraform operates on the correct VM
+    # and updates the corresponding Jira request.
+
     parameters:
+      # Jira ticket associated with the VM resize request.
+      # Example: IT-39
       jira_issue_key: ${{ parameters.jira_issue_key }}
+      # Name of the existing VMware virtual machine.
+      # Example: TF-VM-027
       vm_name: ${{ parameters.vm_name }}
+      # Requested number of virtual CPUs.
+      # Example: 4 vCPUs
       vm_cpu: ${{ parameters.vm_cpu }}
+      # Requested amount of memory.
+      # Example: 4096 MB = 4 GB
       vm_memory: ${{ parameters.vm_memory }}
