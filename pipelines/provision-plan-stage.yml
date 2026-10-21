@@ -1,0 +1,51 @@
+parameters:
+- name: request
+  type: object
+
+stages:
+- stage: Plan
+  displayName: 'Terraform Plan'
+  condition: |
+    and(
+      succeeded(),
+      ne('${{ parameters.request.vm_name }}', '')
+    )
+  jobs:
+  - job: TerraformPlan
+    displayName: 'Plan VM'
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      name: terraformPlan
+      displayName: 'Terraform Init, Validate and Plan'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -euo pipefail
+          export ARM_USE_AZUREAD=true ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_OIDC_TOKEN="$idToken"
+          bash "$(Build.SourcesDirectory)/scripts/provision-plan.sh"
+      env:
+        TF_WORKING_DIR: $(terraformDirectory)
+        TF_VAR_vsphere_user: $(VSPHERE_USER)
+        TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+        TF_VAR_vsphere_server: $(VSPHERE_SERVER)
+        TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
+        TF_VAR_vm_os: ${{ parameters.request.vm_os }}
+        TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+        TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
+        TF_VAR_vm_name: ${{ parameters.request.vm_name }}
+        TF_VAR_vm_hostname: ${{ parameters.request.vm_hostname }}
+        TF_VAR_vm_cpu: ${{ parameters.request.vm_cpu }}
+        TF_VAR_vm_memory: ${{ parameters.request.vm_memory }}
+        TF_VAR_vm_network: ${{ parameters.request.vm_network }}
+        JIRA_ISSUE_KEY: ${{ parameters.request.jira_issue_key }}
+    - publish: $(terraformDirectory)/tfplan.gpg
+      artifact: terraform-plan
+      displayName: 'Save Encrypted Terraform Plan'
+      condition: and(succeeded(), eq(variables['terraformPlan.changesDetected'], 'true'))

@@ -1,0 +1,15 @@
+# Pass the same Jira request to all three stages.
+parameters:
+- name: request
+  type: object
+
+stages:
+- template: provision-plan-stage.yml
+  parameters:
+    request: ${{ parameters.request }}
+- template: provision-apply-stage.yml
+  parameters:
+    request: ${{ parameters.request }}
+- template: provision-postdeploy-stage.yml
+  parameters:
+    request: ${{ parameters.request }}
