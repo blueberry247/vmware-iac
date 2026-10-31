@@ -46,7 +46,7 @@ steps:
 
   displayName: 'Verify VMware PowerCLI Agent'
 
-  # ==========================================
+# ==========================================
 # Step 2 - Test Secure vCenter Connection
 # ==========================================
 
@@ -119,3 +119,14 @@ steps:
     VCENTER_SERVER: $(VCENTER_SERVER)
     VCENTER_USERNAME: $(VCENTER_USERNAME)
     VCENTER_PASSWORD: $(VCENTER_PASSWORD)
+
+# ==========================================
+# Step 3 - Publish VMware CMDB CSV
+# ==========================================
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish VMware CMDB CSV'
+  inputs:
+    targetPath: '/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv'
+    artifact: 'vmware-cmdb'
+    publishLocation: 'pipeline'
