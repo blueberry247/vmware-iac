@@ -87,6 +87,22 @@ steps:
         }
 
         Write-Host "VMs discovered: $($vms.Count)"
+    
+    # Run our existing VMware CMDB export script
+    Write-Host "Starting VMware CMDB export"
+
+    & "/home/bardfox/vmware-cmdb/export-vmware-cmdb.ps1"
+
+    # Verify the exported CSV
+    $csv = "/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv"
+
+    $records = @(Import-Csv $csv)
+
+    if ($records.Count -ne $vms.Count) {
+        throw "CSV count does not match VMware inventory"
+    }
+
+    Write-Host "CSV export verified: $($records.Count) VMs"
     }
     finally {
         # Disconnect safely
