@@ -1,0 +1,40 @@
+# ==========================================
+# VMware CMDB Automation Pipeline
+# Azure DevOps → Debian Agent → VMware
+# ==========================================
+
+# Manual execution only during initial testing
+trigger: none
+pr: none
+
+# Use our existing Debian agent
+pool:
+  name: VMware-Lab
+  demands:
+    - Agent.Name -equals azdo-agent-01
+
+steps:
+
+# Step 1 - Check PowerShell and VMware PowerCLI
+- pwsh: |
+    Write-Host "Checking VMware CMDB agent"
+
+    # Verify PowerShell version
+    $PSVersionTable.PSVersion
+
+    # Load VMware PowerCLI
+    Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+
+    # Verify VMware commands
+    Get-Command Connect-VIServer, Get-VM
+
+    # Check our existing export script
+    $script = "/home/bardfox/vmware-cmdb/export-vmware-cmdb.ps1"
+
+    if (-not (Test-Path $script)) {
+        throw "VMware CMDB export script not found"
+    }
+
+    Write-Host "VMware CMDB agent checks passed"
+
+  displayName: 'Verify VMware PowerCLI Agent'
