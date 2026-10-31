@@ -7,6 +7,13 @@
 trigger: none
 pr: none
 
+# ==========================================
+# Secure VMware Credentials
+# ==========================================
+
+variables:
+- group: vmware-cmdb-secrets
+
 # Use our existing Debian agent
 pool:
   name: VMware-Lab
