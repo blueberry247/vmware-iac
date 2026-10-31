@@ -45,3 +45,61 @@ steps:
     Write-Host "VMware CMDB agent checks passed"
 
   displayName: 'Verify VMware PowerCLI Agent'
+
+  # ==========================================
+# Step 2 - Test Secure vCenter Connection
+# ==========================================
+
+- pwsh: |
+    $ErrorActionPreference = "Stop"
+
+    # Load VMware PowerCLI
+    Import-Module VMware.VimAutomation.Core
+
+    # Retrieve credentials from Azure DevOps
+    $password = ConvertTo-SecureString `
+        $env:VCENTER_PASSWORD -AsPlainText -Force
+
+    $credential = [PSCredential]::new(
+        $env:VCENTER_USERNAME,
+        $password
+    )
+
+    $connection = $null
+
+    try {
+        # Connect to VMware vCenter
+        $connection = Connect-VIServer `
+            -Server $env:VCENTER_SERVER `
+            -Credential $credential `
+            -ErrorAction Stop
+
+        Write-Host "Connected to VMware vCenter"
+
+        # Retrieve virtual machines
+        $vms = @(
+            Get-VM -Server $connection |
+            Where-Object { $_.Name -notlike "vCLS-*" }
+        )
+
+        if ($vms.Count -eq 0) {
+            throw "No virtual machines found"
+        }
+
+        Write-Host "VMs discovered: $($vms.Count)"
+    }
+    finally {
+        # Disconnect safely
+        if ($connection) {
+            Disconnect-VIServer `
+                -Server $connection `
+                -Confirm:$false | Out-Null
+        }
+    }
+
+  displayName: 'Test Secure vCenter Connection'
+
+  env:
+    VCENTER_SERVER: $(VCENTER_SERVER)
+    VCENTER_USERNAME: $(VCENTER_USERNAME)
+    VCENTER_PASSWORD: $(VCENTER_PASSWORD)
