@@ -130,3 +130,27 @@ steps:
     targetPath: '/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv'
     artifact: 'vmware-cmdb'
     publishLocation: 'pipeline'
+
+
+# ==========================================
+# STEP 4 - Verify Azure Blob Storage Access
+# ==========================================
+
+- task: AzureCLI@2
+  displayName: 'Verify Azure Blob Storage Access'
+  inputs:
+    azureSubscription: 'Azure-Terraform-State'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      echo "Checking Azure Storage access..."
+
+      az storage blob list \
+        --account-name tfstatevmware247 \
+        --container-name vmware-cmdb \
+        --auth-mode login \
+        --output table
+
+      echo "Azure Storage access verified"
