@@ -8,6 +8,19 @@ trigger: none
 pr: none
 
 # ==========================================
+# Schedule VMware CMDB Inventory Export
+# Daily at 09:00 UTC
+# ==========================================
+
+schedules:
+- cron: '0 9 * * *'
+  displayName: 'Daily VMware CMDB Sync'
+  branches:
+    include:
+    - feature/vmware-cmdb-sync
+  always: true
+
+# ==========================================
 # Secure VMware Credentials
 # ==========================================
 
