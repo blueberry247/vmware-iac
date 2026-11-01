@@ -133,11 +133,11 @@ steps:
 
 
 # ==========================================
-# STEP 4 - Verify Azure Blob Storage Access
+# STEP 4 - Upload VMware CSV to Azure Blob
 # ==========================================
 
 - task: AzureCLI@2
-  displayName: 'Verify Azure Blob Storage Access'
+  displayName: 'Upload VMware CMDB CSV to Azure'
   inputs:
     azureSubscription: 'Azure-Terraform-State'
     scriptType: 'bash'
@@ -145,12 +145,22 @@ steps:
     inlineScript: |
       set -euo pipefail
 
-      echo "Checking Azure Storage access..."
+      echo "Starting VMware CMDB upload..."
 
-      az storage blob list \
+      CSV="/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv"
+
+      # Check that the CSV exists and is not empty
+      test -s "$CSV"
+
+      # Upload the latest inventory to Azure Storage
+      az storage blob upload \
         --account-name tfstatevmware247 \
         --container-name vmware-cmdb \
+        --name vmware-cmdb-full-with-disk.csv \
+        --file "$CSV" \
         --auth-mode login \
-        --output table
+        --overwrite true \
+        --content-type text/csv \
+        --only-show-errors
 
-      echo "Azure Storage access verified"
+      echo "VMware CMDB CSV uploaded successfully"
