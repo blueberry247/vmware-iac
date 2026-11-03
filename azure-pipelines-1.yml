@@ -36,7 +36,7 @@ steps:
     Get-Command Connect-VIServer, Get-VM
 
     # Check our existing export script
-    $script = "/home/bardfox/vmware-cmdb/export-vmware-cmdb.ps1"
+    $script = "$(Build.SourcesDirectory)/scripts/export-vmware-cmdb.ps1"
 
     if (-not (Test-Path $script)) {
         throw "VMware CMDB export script not found"
@@ -91,7 +91,7 @@ steps:
     # Run our existing VMware CMDB export script
     Write-Host "Starting VMware CMDB export"
 
-    & "/home/bardfox/vmware-cmdb/export-vmware-cmdb.ps1"
+    & "$(Build.SourcesDirectory)/scripts/export-vmware-cmdb.ps1"
 
     # Verify the exported CSV
     $csv = "/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv"
