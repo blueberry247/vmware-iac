@@ -7,6 +7,13 @@
 trigger: none
 pr: none
 
+# ==========================================
+# Secure VMware Credentials
+# ==========================================
+
+variables:
+- group: vmware-cmdb-secrets
+
 # Use our existing Debian agent
 pool:
   name: VMware-Lab
@@ -29,7 +36,7 @@ steps:
     Get-Command Connect-VIServer, Get-VM
 
     # Check our existing export script
-    $script = "/home/bardfox/vmware-cmdb/export-vmware-cmdb.ps1"
+    $script = "$(Build.SourcesDirectory)/scripts/export-vmware-cmdb.ps1"
 
     if (-not (Test-Path $script)) {
         throw "VMware CMDB export script not found"
@@ -38,3 +45,122 @@ steps:
     Write-Host "VMware CMDB agent checks passed"
 
   displayName: 'Verify VMware PowerCLI Agent'
+
+# ==========================================
+# Step 2 - Test Secure vCenter Connection
+# ==========================================
+
+- pwsh: |
+    $ErrorActionPreference = "Stop"
+
+    # Load VMware PowerCLI
+    Import-Module VMware.VimAutomation.Core
+
+    # Retrieve credentials from Azure DevOps
+    $password = ConvertTo-SecureString `
+        $env:VCENTER_PASSWORD -AsPlainText -Force
+
+    $credential = [PSCredential]::new(
+        $env:VCENTER_USERNAME,
+        $password
+    )
+
+    $connection = $null
+
+    try {
+        # Connect to VMware vCenter
+        $connection = Connect-VIServer `
+            -Server $env:VCENTER_SERVER `
+            -Credential $credential `
+            -ErrorAction Stop
+
+        Write-Host "Connected to VMware vCenter"
+
+        # Retrieve virtual machines
+        $vms = @(
+            Get-VM -Server $connection |
+            Where-Object { $_.Name -notlike "vCLS-*" }
+        )
+
+        if ($vms.Count -eq 0) {
+            throw "No virtual machines found"
+        }
+
+        Write-Host "VMs discovered: $($vms.Count)"
+    
+    # Run our existing VMware CMDB export script
+    Write-Host "Starting VMware CMDB export"
+
+    & "$(Build.SourcesDirectory)/scripts/export-vmware-cmdb.ps1"
+
+    # Verify the exported CSV
+    $csv = "/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv"
+
+    $records = @(Import-Csv $csv)
+
+    if ($records.Count -ne $vms.Count) {
+        throw "CSV count does not match VMware inventory"
+    }
+
+    Write-Host "CSV export verified: $($records.Count) VMs"
+    }
+    finally {
+        # Disconnect safely
+        if ($connection) {
+            Disconnect-VIServer `
+                -Server $connection `
+                -Confirm:$false | Out-Null
+        }
+    }
+
+  displayName: 'Test Secure vCenter Connection'
+
+  env:
+    VCENTER_SERVER: $(VCENTER_SERVER)
+    VCENTER_USERNAME: $(VCENTER_USERNAME)
+    VCENTER_PASSWORD: $(VCENTER_PASSWORD)
+
+# ==========================================
+# Step 3 - Publish VMware CMDB CSV
+# ==========================================
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish VMware CMDB CSV'
+  inputs:
+    targetPath: '/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv'
+    artifact: 'vmware-cmdb'
+    publishLocation: 'pipeline'
+
+
+# ==========================================
+# STEP 4 - Upload VMware CSV to Azure Blob
+# ==========================================
+
+- task: AzureCLI@2
+  displayName: 'Upload VMware CMDB CSV to Azure'
+  inputs:
+    azureSubscription: 'Azure-Terraform-State'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -euo pipefail
+
+      echo "Starting VMware CMDB upload..."
+
+      CSV="/home/bardfox/vmware-cmdb/vmware-cmdb-full-with-disk.csv"
+
+      # Check that the CSV exists and is not empty
+      test -s "$CSV"
+
+      # Upload the latest inventory to Azure Storage
+      az storage blob upload \
+        --account-name tfstatevmware247 \
+        --container-name vmware-cmdb \
+        --name vmware-cmdb-full-with-disk.csv \
+        --file "$CSV" \
+        --auth-mode login \
+        --overwrite true \
+        --content-type text/csv \
+        --only-show-errors
+
+      echo "VMware CMDB CSV uploaded successfully"
