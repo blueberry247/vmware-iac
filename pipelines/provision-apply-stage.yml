@@ -19,15 +19,25 @@ stages:
   jobs:
   - deployment: TerraformApply
     displayName: 'Create VMware VM'
-    environment: 'VMware-Production' # Existing manual approval check remains mandatory.
+    environment: 'VMware-Production' # Existing manual approval remains required.
     strategy:
       runOnce:
         deploy:
           steps:
           - checkout: self
+
+          - task: AzureKeyVault@2
+            displayName: 'Read provisioning secrets from Key Vault'
+            inputs:
+              azureSubscription: 'Azure-Terraform-State'
+              KeyVaultName: 'kv-vmware-iac-247'
+              SecretsFilter: 'VSPHERE-USER,VSPHERE-PASSWORD,WINDOWS-ADMIN-PASSWORD'
+              RunAsPreJob: false
+
           - download: current
             artifact: terraform-plan
             displayName: 'Download Terraform Plan'
+
           - task: AzureCLI@2
             displayName: 'Terraform Apply'
             inputs:
@@ -45,11 +55,11 @@ stages:
             env:
               TF_WORKING_DIR: $(terraformDirectory)
               PLAN_ARTIFACT_FILE: $(Pipeline.Workspace)/terraform-plan/tfplan.gpg
-              TF_VAR_vsphere_user: $(VSPHERE_USER)
-              TF_VAR_vsphere_password: $(VSPHERE_PASSWORD)
+              TF_VAR_vsphere_user: $(VSPHERE-USER)
+              TF_VAR_vsphere_password: $(VSPHERE-PASSWORD)
               TF_VAR_vsphere_server: $(VSPHERE_SERVER)
               TF_VAR_vm_os: ${{ parameters.request.vm_os }}
-              TF_VAR_windows_admin_password: $(WINDOWS_ADMIN_PASSWORD)
+              TF_VAR_windows_admin_password: $(WINDOWS-ADMIN-PASSWORD)
               TF_VAR_ansible_ssh_public_key: $(ANSIBLE_SSH_PUBLIC_KEY)
               TF_PLAN_PASSPHRASE: $(TF_PLAN_PASSPHRASE)
               TF_VAR_vm_name: ${{ parameters.request.vm_name }}

@@ -30,6 +30,15 @@ stages:
     displayName: 'Verify VM, configure with Ansible, update and resolve Jira'
     steps:
     - checkout: self
+
+    - task: AzureKeyVault@2
+      displayName: 'Read configuration secrets from Key Vault'
+      inputs:
+        azureSubscription: 'Azure-Terraform-State'
+        KeyVaultName: 'kv-vmware-iac-247'
+        SecretsFilter: 'VSPHERE-USER,VSPHERE-PASSWORD,WINDOWS-ADMIN-PASSWORD,JIRA-API-TOKEN'
+        RunAsPreJob: false
+
     - task: AzureCLI@2
       displayName: 'Read VM IP from Terraform state'
       inputs:
@@ -56,7 +65,7 @@ stages:
         filePath: '$(Build.SourcesDirectory)/scripts/provision-windows-ready.sh'
       env:
         VM_IP: $(PROVISIONED_VM_IP)
-        WINDOWS_ADMIN_PASSWORD: $(WINDOWS_ADMIN_PASSWORD)
+        WINDOWS_ADMIN_PASSWORD: $(WINDOWS-ADMIN-PASSWORD)
 
     - task: Bash@3
       displayName: 'VMware - Register Debian SSH host key'
@@ -69,8 +78,8 @@ stages:
         VM_IP: $(PROVISIONED_VM_IP)
         BUILD_ID: $(Build.BuildId)
         GOVC_URL: $(VSPHERE_SERVER)
-        GOVC_USERNAME: $(VSPHERE_USER)
-        GOVC_PASSWORD: $(VSPHERE_PASSWORD)
+        GOVC_USERNAME: $(VSPHERE-USER)
+        GOVC_PASSWORD: $(VSPHERE-PASSWORD)
         GOVC_GUEST_LOGIN: $(DEBIAN_GUEST_LOGIN)
 
     - task: Bash@3
@@ -93,15 +102,13 @@ stages:
       env:
         JIRA_BASE_URL: $(JIRA_BASE_URL)
         JIRA_EMAIL: $(JIRA_EMAIL)
-        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+        JIRA_API_TOKEN: $(JIRA-API-TOKEN)
         JIRA_ISSUE_KEY: ${{ parameters.request.jira_issue_key }}
         VM_HOSTNAME: ${{ parameters.request.vm_hostname }}
         VM_NAME_PARAMETER: ${{ parameters.request.vm_name }}
         PROVISIONED_VM_IP: $(PROVISIONED_VM_IP)
 
-    # Resolve only after the preceding VM readiness and Jira comment steps pass.
-    # Jira transition IDs vary by workflow, so the script discovers the available
-    # transition to the Resolved status (Done category) and verifies Resolution.
+    # Resolve only after VM readiness and the Jira comment succeed.
     - task: Bash@3
       displayName: 'Resolve Jira provisioning ticket'
       condition: succeeded()
@@ -113,6 +120,6 @@ stages:
       env:
         JIRA_BASE_URL: $(JIRA_BASE_URL)
         JIRA_EMAIL: $(JIRA_EMAIL)
-        JIRA_API_TOKEN: $(JIRA_API_TOKEN)
+        JIRA_API_TOKEN: $(JIRA-API-TOKEN)
         JIRA_ISSUE_KEY: ${{ parameters.request.jira_issue_key }}
         JIRA_RESOLVED_STATUS: 'Resolved'
